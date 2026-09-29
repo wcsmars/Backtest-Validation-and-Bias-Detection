@@ -404,9 +404,8 @@ def rebalance_rows(positions: pd.DataFrame,
     """
     pos = positions.fillna(0.0).to_numpy(dtype=float)
     n = pos.shape[0]
-    out = np.zeros(n, dtype=bool)
     if n == 0:
-        return out
+        return np.zeros(0, dtype=bool)
     raw = np.zeros_like(pos, dtype=bool)
     raw[1:] = np.abs(np.diff(pos, axis=0)) > REBALANCE_ABS_TOL
     drift = drifted_weights(positions, asset_returns)
@@ -414,7 +413,7 @@ def rebalance_rows(positions: pd.DataFrame,
     ref = np.where(defined, drift, 0.0)
     moved = np.abs(pos - ref) > np.abs(ref) * REBALANCE_REL_TOL + REBALANCE_ABS_TOL
     moved = np.where(defined, moved, True)
-    out = (raw & moved).any(axis=1)
+    out = np.asarray((raw & moved).any(axis=1), dtype=bool)
     out[0] = bool((np.abs(pos[0]) > REBALANCE_ABS_TOL).any())
     return out
 

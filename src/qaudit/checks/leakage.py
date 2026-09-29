@@ -807,7 +807,7 @@ def _exact_spearman_tail_dp(n: int) -> tuple[np.ndarray, np.ndarray]:
     slot = np.zeros(full, dtype=np.int64)       # mask -> row in its layer
     for mk in layers:
         slot[mk] = np.arange(mk.size)
-    cur = np.ones((1, 1), dtype=np.int64)      # empty prefix: T = 0
+    cur: np.ndarray = np.ones((1, 1), dtype=np.int64)   # empty prefix: T = 0
     base = 0                                    # score of column 0
     for k in range(n):
         mk = layers[k]
@@ -868,14 +868,20 @@ def _spearman_tail_ge_conservative(n: int, x: float) -> float:
     u = z * b * (c1 + b * (c2 + c3 * b) + y * (
         -c4 + b * (c5 + c6 * b) - y * b * (
             c7 + c8 * b - y * (c9 - c10 * b + y * b * (c11 - c12 * y)))))
-    edge = min(max(u * math.exp(-y / 2.0) + float(norm.sf(z)), 0.0), 1.0)
+    # Deep-tail survival functions can underflow to 0, which is the right
+    # value; older scipy (1.10) signals that underflow, so declare it
+    # expected rather than let np.seterr(all='raise') turn it into an error.
+    with np.errstate(under="ignore"):
+        normal_tail = float(norm.sf(z))
+    edge = min(max(u * math.exp(-y / 2.0) + normal_tail, 0.0), 1.0)
     kurt = (3.0 * (25.0 * n ** 3 - 38.0 * n ** 2 - 35.0 * n + 72.0)
             / (25.0 * n * (n + 1.0) * (n - 1.0)))
     u2 = 2.0 * kurt / (3.0 - kurt)          # 2m + 3 for (1 - (r/c)^2)^m
     half_width = np.sqrt(u2 / (n - 1.0))    # c: matches Var = 1/(n-1)
     shape = (u2 - 1.0) / 2.0                # m + 1
-    pearson = float(beta_dist.sf((rc / half_width + 1.0) / 2.0,
-                                 shape, shape))
+    with np.errstate(under="ignore"):
+        pearson = float(beta_dist.sf((rc / half_width + 1.0) / 2.0,
+                                     shape, shape))
     return max(edge, pearson)
 
 
