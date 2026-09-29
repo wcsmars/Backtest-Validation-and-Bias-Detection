@@ -1,0 +1,1119 @@
+{
+  "summary": "qaudit: SUSPECT - 39 checks (9 FAIL, 2 WARN, 23 PASS, 5 SKIP)",
+  "ok": false,
+  "meta": {
+    "n_periods": 1000,
+    "n_assets": 30,
+    "usable_joint_dates": 980,
+    "max_jointly_finite_assets": 30,
+    "median_jointly_finite_assets": 30.0,
+    "dates_with_cross_sectional_support": 980,
+    "start": "2018-01-02",
+    "end": "2021-11-01",
+    "signal_lag": 1,
+    "label_horizon": 1,
+    "periods_per_year": 252.0,
+    "declared_costs_bps": 10.0,
+    "train_period": [
+      "2018-01-02 00:00:00",
+      "2020-04-21 00:00:00"
+    ],
+    "test_period": [
+      "2020-04-28 00:00:00",
+      "2021-11-01 00:00:00"
+    ],
+    "has_positions": true,
+    "has_strategy_returns": true,
+    "has_universe": true,
+    "has_signal_func": false,
+    "has_backtest_func": true,
+    "n_trials": null,
+    "expected_check_ids": [
+      "lookahead.position_signal_alignment",
+      "lookahead.embedded_future_return",
+      "lookahead.ic_decay_signature",
+      "lookahead.same_bar_bleed",
+      "lookahead.future_vol_sizing",
+      "lookahead.deferred_ic_spike",
+      "lookahead.smeared_forward_ic",
+      "lookahead.same_bar_return_loading",
+      "leakage.target_correlation",
+      "leakage.perfect_rank_dates",
+      "leakage.signal_target_identity",
+      "leakage.ic_outlier_dates",
+      "contamination.split_declared",
+      "contamination.split_overlap",
+      "contamination.insufficient_embargo",
+      "contamination.test_before_train",
+      "contamination.split_coverage",
+      "survivorship.trading_outside_universe",
+      "survivorship.positions_on_missing_returns",
+      "survivorship.no_exits",
+      "survivorship.full_history_universe",
+      "performance.suspicious_sharpe",
+      "performance.deflated_sharpe",
+      "performance.suspicious_ic",
+      "performance.ic_stability",
+      "performance.ic_regime_concentration",
+      "performance.sample_size",
+      "costs.missing_transaction_costs",
+      "costs.no_cost_declaration",
+      "costs.turnover_unrealistic",
+      "costs.cost_sensitivity",
+      "costs.price_return_consistency",
+      "dynamic.placebo_pipeline_bias",
+      "dynamic.placebo_percentile",
+      "dynamic.shuffled_labels",
+      "dynamic.probe_health",
+      "dynamic.date_shift",
+      "dynamic.signal_reproducibility",
+      "dynamic.rolling_window_integrity",
+      "dynamic.signal_input_sensitivity"
+    ],
+    "provenance": {
+      "qaudit_version": "0.1.0",
+      "qaudit_source_digest": "396ec28ce6aa2c9a515d9635769d2c582822bb8a27f377eff4c0162f3920cf29",
+      "config": {
+        "seed": 1,
+        "min_periods": 120,
+        "n_trials": null,
+        "future_return_embed_ic": 0.6,
+        "predictive_ic_warn": 0.08,
+        "predictive_ic_fail": 0.15,
+        "ic_decay_collapse_ratio": 0.15,
+        "bleed_partial_fail": 0.1,
+        "bleed_tstat": 4.0,
+        "fwd_vol_window": 10,
+        "deferred_ic_max_horizon": 6,
+        "leak_median_ic_warn": 0.3,
+        "leak_median_ic_fail": 0.5,
+        "leak_perfect_ic": 0.9,
+        "leak_perfect_date_frac": 0.01,
+        "leak_perfect_min_names": 8,
+        "leak_identity_corr": 0.95,
+        "leak_outlier_ic": 0.4,
+        "min_embargo_periods": null,
+        "full_history_frac_warn": 0.95,
+        "min_assets_survivorship": 10,
+        "min_exit_rate_per_year": 0.01,
+        "sharpe_warn": 3.0,
+        "sharpe_fail": 5.0,
+        "dsr_warn": 0.95,
+        "dsr_fail": 0.5,
+        "ic_rolling_window": 63,
+        "ic_sign_consistency_warn": 0.6,
+        "ic_regime_share_warn": 0.6,
+        "turnover_daily_warn": 0.25,
+        "turnover_daily_fail": 1.0,
+        "cost_sensitivity_bps": [
+          5.0,
+          10.0,
+          25.0
+        ],
+        "gross_match_atol": 1e-12,
+        "min_turnover_for_cost_check": 0.01,
+        "n_placebo": 50,
+        "n_shuffle": 50,
+        "placebo_null_sharpe_fail": 0.5,
+        "placebo_percentile_warn": 0.95,
+        "shuffle_pvalue_warn": 0.05,
+        "shuffle_leak_ratio": 0.5,
+        "shuffle_block_len": null,
+        "date_shift_max": 3,
+        "shift_delay_collapse_ratio": 0.2,
+        "truncation_sample_dates": 12,
+        "truncation_rtol": 1e-06,
+        "truncation_atol": 1e-08,
+        "extra": {}
+      },
+      "config_hash": "2e1fa2a15e4b9ea3a10b533b3c088927f53dcfeae09d1d4637394345fb7019c5",
+      "checks_selected_modules": [
+        "qaudit.checks.lookahead",
+        "qaudit.checks.leakage",
+        "qaudit.checks.contamination",
+        "qaudit.checks.survivorship",
+        "qaudit.checks.performance",
+        "qaudit.checks.costs",
+        "qaudit.dynamic.probes_null",
+        "qaudit.dynamic.probes_shift"
+      ],
+      "checks_expected": {
+        "qaudit.checks.lookahead": [
+          "lookahead.position_signal_alignment",
+          "lookahead.embedded_future_return",
+          "lookahead.ic_decay_signature",
+          "lookahead.same_bar_bleed",
+          "lookahead.future_vol_sizing",
+          "lookahead.deferred_ic_spike",
+          "lookahead.smeared_forward_ic",
+          "lookahead.same_bar_return_loading"
+        ],
+        "qaudit.checks.leakage": [
+          "leakage.target_correlation",
+          "leakage.perfect_rank_dates",
+          "leakage.signal_target_identity",
+          "leakage.ic_outlier_dates"
+        ],
+        "qaudit.checks.contamination": [
+          "contamination.split_declared",
+          "contamination.split_overlap",
+          "contamination.insufficient_embargo",
+          "contamination.test_before_train",
+          "contamination.split_coverage"
+        ],
+        "qaudit.checks.survivorship": [
+          "survivorship.trading_outside_universe",
+          "survivorship.positions_on_missing_returns",
+          "survivorship.no_exits",
+          "survivorship.full_history_universe"
+        ],
+        "qaudit.checks.performance": [
+          "performance.suspicious_sharpe",
+          "performance.deflated_sharpe",
+          "performance.suspicious_ic",
+          "performance.ic_stability",
+          "performance.ic_regime_concentration",
+          "performance.sample_size"
+        ],
+        "qaudit.checks.costs": [
+          "costs.missing_transaction_costs",
+          "costs.no_cost_declaration",
+          "costs.turnover_unrealistic",
+          "costs.cost_sensitivity",
+          "costs.price_return_consistency"
+        ],
+        "qaudit.dynamic.probes_null": [
+          "dynamic.placebo_pipeline_bias",
+          "dynamic.placebo_percentile",
+          "dynamic.shuffled_labels",
+          "dynamic.probe_health"
+        ],
+        "qaudit.dynamic.probes_shift": [
+          "dynamic.date_shift",
+          "dynamic.signal_reproducibility",
+          "dynamic.rolling_window_integrity",
+          "dynamic.signal_input_sensitivity"
+        ]
+      },
+      "checks_emitted": [
+        "lookahead.position_signal_alignment",
+        "lookahead.same_bar_bleed",
+        "lookahead.future_vol_sizing",
+        "lookahead.embedded_future_return",
+        "lookahead.ic_decay_signature",
+        "lookahead.deferred_ic_spike",
+        "lookahead.smeared_forward_ic",
+        "lookahead.same_bar_return_loading",
+        "leakage.target_correlation",
+        "leakage.perfect_rank_dates",
+        "leakage.signal_target_identity",
+        "leakage.ic_outlier_dates",
+        "contamination.split_declared",
+        "contamination.split_overlap",
+        "contamination.insufficient_embargo",
+        "contamination.test_before_train",
+        "contamination.split_coverage",
+        "survivorship.trading_outside_universe",
+        "survivorship.positions_on_missing_returns",
+        "survivorship.no_exits",
+        "survivorship.full_history_universe",
+        "performance.suspicious_sharpe",
+        "performance.deflated_sharpe",
+        "performance.suspicious_ic",
+        "performance.ic_stability",
+        "performance.ic_regime_concentration",
+        "performance.sample_size",
+        "costs.missing_transaction_costs",
+        "costs.no_cost_declaration",
+        "costs.turnover_unrealistic",
+        "costs.cost_sensitivity",
+        "costs.price_return_consistency",
+        "dynamic.placebo_pipeline_bias",
+        "dynamic.placebo_percentile",
+        "dynamic.shuffled_labels",
+        "dynamic.date_shift",
+        "dynamic.signal_reproducibility",
+        "dynamic.rolling_window_integrity",
+        "dynamic.signal_input_sensitivity"
+      ],
+      "include": null,
+      "exclude": null,
+      "strict": false,
+      "timings_s": {
+        "qaudit.checks.lookahead": 2.843687,
+        "qaudit.checks.leakage": 0.279782,
+        "qaudit.checks.contamination": 0.000243,
+        "qaudit.checks.survivorship": 0.0046,
+        "qaudit.checks.performance": 0.117444,
+        "qaudit.checks.costs": 0.018294,
+        "qaudit.dynamic.probes_null": 0.57038,
+        "qaudit.dynamic.probes_shift": 0.020803
+      },
+      "deps": {
+        "python": "3.11.7",
+        "numpy": "1.26.4",
+        "pandas": "2.3.3",
+        "scipy": "1.17.1"
+      },
+      "timestamp_utc": "2026-09-28T16:33:23.655397+00:00",
+      "artifact_coverage": {
+        "signals": {
+          "shape": [
+            1000,
+            30
+          ],
+          "non_null_frac": 0.9502666666666667,
+          "index_start": "2018-01-02 00:00:00",
+          "index_end": "2021-11-01 00:00:00"
+        },
+        "asset_returns": {
+          "shape": [
+            1000,
+            30
+          ],
+          "non_null_frac": 0.9702666666666667,
+          "index_start": "2018-01-02 00:00:00",
+          "index_end": "2021-11-01 00:00:00"
+        },
+        "positions": {
+          "shape": [
+            1000,
+            30
+          ],
+          "non_null_frac": 1.0,
+          "index_start": "2018-01-02 00:00:00",
+          "index_end": "2021-11-01 00:00:00"
+        },
+        "strategy_returns": {
+          "shape": [
+            1000
+          ],
+          "non_null_frac": 1.0,
+          "index_start": "2018-01-02 00:00:00",
+          "index_end": "2021-11-01 00:00:00"
+        },
+        "universe": {
+          "shape": [
+            1000,
+            30
+          ],
+          "non_null_frac": 1.0,
+          "index_start": "2018-01-02 00:00:00",
+          "index_end": "2021-11-01 00:00:00"
+        },
+        "prices": {
+          "shape": [
+            1000,
+            30
+          ],
+          "non_null_frac": 0.9702666666666667,
+          "index_start": "2018-01-02 00:00:00",
+          "index_end": "2021-11-01 00:00:00"
+        }
+      },
+      "artifact_digest": {
+        "signals": "dd78fdcfbadd5523892aadc391501ede7ad6b5406927c532d903643e00b5047a",
+        "asset_returns": "d6499b36d6d81b6c0a91e14611adda190c05bdcbb63e355f5d453dffb6b6f7c5",
+        "positions": "f702c33e16aa820e0fdb476c3e9959e0d27adcf0bfb4a7475d5424488838c09d",
+        "strategy_returns": "9d8cf0f6b56a946f937c4f812fce04d81d871e4789facbf9f66aa46375b6aeb4",
+        "universe": "15193f0737e5209ad646290dbbf748bce3f81d90eb983f836f6b78d39905c63d",
+        "prices": "e20277c74a790f26a16733c4d661ba4bcf5f617cd6a0674076f6fc9fdbc5d0c5",
+        "signal_input": "d6499b36d6d81b6c0a91e14611adda190c05bdcbb63e355f5d453dffb6b6f7c5"
+      },
+      "artifact_parameters": {
+        "signal_lag": 1,
+        "label_horizon": 1,
+        "periods_per_year": 252.0,
+        "declared_costs_bps": 10.0,
+        "train_period": [
+          "2018-01-02T00:00:00",
+          "2020-04-21T00:00:00"
+        ],
+        "test_period": [
+          "2020-04-28T00:00:00",
+          "2021-11-01T00:00:00"
+        ]
+      },
+      "artifact_parameters_hash": "7757eb0f2fcba63d22e7deff558b32b6494c85237d252ad6c0a0f20ca5d69289",
+      "callables": {
+        "signal_func": null,
+        "backtest_func": "qaudit.synthetic.make_backtest_func.<locals>.backtest_func"
+      },
+      "callable_digest": {
+        "signal_func": null,
+        "backtest_func": "5a6b57710789c3aae1c854fb0ec22ccecbbd58e9610595849c9783672d707c2b"
+      }
+    }
+  },
+  "results": [
+    {
+      "check": "lookahead.position_signal_alignment",
+      "status": "pass",
+      "severity": "critical",
+      "message": "positions align best with the signal at lag 1 (declared lag 1); mean |cross-sectional Spearman| profile: k=0: 0.177, k=1: 1.000, k=2: 0.177, k=3: 0.180 - no lag younger than 1 beats the declared lag by more than 0.01.",
+      "remediation": "",
+      "details": {
+        "alignment_profile": {
+          "0": 0.1771357646559806,
+          "1": 1.0,
+          "2": 0.17711170502711668,
+          "3": 0.18046125133345425
+        },
+        "n_dates_per_lag": {
+          "0": 979,
+          "1": 980,
+          "2": 979,
+          "3": 978
+        },
+        "n_cells_per_lag": {
+          "0": 28344,
+          "1": 28374,
+          "2": 28344,
+          "3": 28314
+        },
+        "declared_lag": 1,
+        "best_lag": 1,
+        "margin": 0.01,
+        "min_baseline_dates": 10,
+        "min_baseline_cells": 100
+      }
+    },
+    {
+      "check": "lookahead.same_bar_bleed",
+      "status": "pass",
+      "severity": "info",
+      "message": "positions are a monotone function of the declared lag-1 signal on all 979 measurable dates - no residual channel through which a same-bar bleed could flow",
+      "remediation": "",
+      "details": {
+        "n_usable": 0,
+        "n_monotone": 979,
+        "n_held": 0
+      }
+    },
+    {
+      "check": "lookahead.future_vol_sizing",
+      "status": "pass",
+      "severity": "info",
+      "message": "partial corr of |positions| with forward 10-bar vol (both residualized on the trailing risk state: 10d/15d/20d/30d/40d/60d/EWMA-hl5/hl10/hl20/hl40/hl120 vol + 20d/60d semivol + |ret|-EWMA-hl15 + trailing mean return) = +0.021, NW t 2.3 over 970 dates - no anticipation signature clears the forward-vol thresholds in either direction. This comparison controls for RETURNS-DERIVED trailing-risk estimates; per-name risk inputs absent from returns, such as implied vol or range estimates, remain outside its scope. Passing these thresholds does not establish causal sizing.",
+      "remediation": "",
+      "details": {
+        "mean_partial_corr": 0.020954895627601947,
+        "nw_tstat": 2.336076867387887,
+        "corr_warn": -0.05,
+        "corr_fail": -0.075,
+        "corr_warn_pos": 0.1,
+        "corr_fail_pos": 0.15,
+        "tstat_gate": 4.0,
+        "n_usable": 970,
+        "n_candidates": 979,
+        "n_below_names": 9,
+        "n_uniform": 0,
+        "n_explained": 0,
+        "fwd_vol_window": 10
+      }
+    },
+    {
+      "check": "lookahead.embedded_future_return",
+      "status": "fail",
+      "severity": "critical",
+      "message": "signal contains the next-period return: mean |per-date Spearman IC| vs the h=1 forward return = 0.957 over 980 dates (threshold 0.60; mean |IC| has a breadth-dependent noise floor even for signal-free inputs, but only a signal embedding the return itself reaches this level).",
+      "remediation": "Remove the label window from the feature computation: every input to signals.loc[t] must be observable by the close of period t. Look for shift(-1)-style bugs, features built from the target, or timestamps recorded at publication rather than observation.",
+      "details": {
+        "mean_abs_ic": {
+          "1": 0.9566896265675408
+        },
+        "n_dates": {
+          "1": 980
+        },
+        "threshold": 0.6,
+        "min_ic_dates": 30
+      }
+    },
+    {
+      "check": "lookahead.ic_decay_signature",
+      "status": "warn",
+      "severity": "high",
+      "message": "predictive information lives entirely in the next bar and vanishes at t+2 (mean IC(h=1) = 0.957, IC at t+2 = 0.012, ratio 0.012 < 0.15) - pattern of an embedded future return rather than a persistent alpha.",
+      "remediation": "Audit the feature pipeline for use of the t+1 bar (target leakage, shift(-1) bugs, same-bar closes); a genuine alpha decays gradually across horizons instead of dropping to zero after exactly one bar.",
+      "details": {
+        "ic1": 0.9566754195562733,
+        "ic2": 0.011865650441096318,
+        "ratio": 0.012403005448389029,
+        "n_dates_ic1": 980,
+        "n_dates_ic2": 979,
+        "n_common_dates": 979,
+        "ic1_trigger": 0.15,
+        "collapse_ratio": 0.15
+      }
+    },
+    {
+      "check": "lookahead.deferred_ic_spike",
+      "status": "pass",
+      "severity": "info",
+      "message": "IC decays normally across horizons (t+1: +0.957, max at t+6: +0.016) - no deferred-window signature",
+      "remediation": "",
+      "details": {
+        "ic_by_horizon": {
+          "1": 0.9567,
+          "2": 0.012,
+          "3": 0.0116,
+          "4": 0.0132,
+          "5": 0.0034,
+          "6": 0.0158
+        },
+        "ic1": 0.9567,
+        "spike_horizon": 6,
+        "spike_ic": 0.0158,
+        "n_common_dates": 975,
+        "n_dates_by_horizon": {
+          "1": 980,
+          "2": 979,
+          "3": 978,
+          "4": 977,
+          "5": 976,
+          "6": 975
+        }
+      }
+    },
+    {
+      "check": "lookahead.smeared_forward_ic",
+      "status": "fail",
+      "severity": "critical",
+      "message": "the signal INNOVATION (residualized on its own lag, its last nonzero value, the same-bar return and the trailing 20-bar mean) predicts forward returns with cumulative |IC| mass 0.963 over horizons 1..10 (0.920 above the noise mass 0.043; pooled NW t 54; per-horizon: {'1': 0.9271, '2': 0.0026, '3': 0.0041, '4': 0.0051, '5': -0.0051, '6': 0.0054, '7': 0.0008, '8': 0.0043, '9': -0.0014, '10': 0.0076}). The excess mass and pooled t clear the diagnostic thresholds after controlling for observed past information; inspect the feature pipeline for forward-window inputs.",
+      "remediation": "The signal's day-to-day innovation carries forward-return information integrated across horizons - the smeared form of a lookahead leak (a feature averaging future bars, a label window smeared over t+1.., a slowly-contaminated feature store). Profile each feature's innovation IC by horizon (residualize on the feature's own lag and same-day observables first), find the ones still predicting many bars out, re-lag or remove them, and regenerate signals.",
+      "details": {
+        "ic_mass": 0.9634,
+        "null_mass": 0.0432,
+        "excess_mass": 0.9203,
+        "nw_tstat": 54.2,
+        "innovation_ic_by_horizon": {
+          "1": 0.9271,
+          "2": 0.0026,
+          "3": 0.0041,
+          "4": 0.0051,
+          "5": -0.0051,
+          "6": 0.0054,
+          "7": 0.0008,
+          "8": 0.0043,
+          "9": -0.0014,
+          "10": 0.0076
+        },
+        "h_max": 10,
+        "n_dates": 979,
+        "n_degenerate": 0,
+        "n_degenerate_by_horizon": {
+          "1": 0,
+          "2": 0,
+          "3": 0,
+          "4": 0,
+          "5": 0,
+          "6": 0,
+          "7": 0,
+          "8": 0,
+          "9": 0,
+          "10": 0
+        },
+        "n_common_dates": 970,
+        "mass_warn": 0.1,
+        "mass_fail": 0.15,
+        "tstat_gate": 4.0
+      }
+    },
+    {
+      "check": "lookahead.same_bar_return_loading",
+      "status": "pass",
+      "severity": "info",
+      "message": "position magnitudes are fully explained by the declared lag-1 signal on 980 dates",
+      "remediation": "",
+      "details": {
+        "n_usable": 0,
+        "n_explained": 980,
+        "stray_mean_corr": null
+      }
+    },
+    {
+      "check": "leakage.target_correlation",
+      "status": "fail",
+      "severity": "critical",
+      "message": "median |per-date Spearman IC| of signals vs 1-period forward return = 0.960 over 980 dates (noise floor at 30 names ~0.13); genuine equity alphas sit near the noise floor - the target is leaking into the signal",
+      "remediation": "Rebuild every feature for date t from data timestamped <= t; drop or re-lag any feature computed over the label window (returns after t), then regenerate signals and re-run the backtest.",
+      "details": {
+        "median_abs_ic": 0.9595105672969966,
+        "mean_ic": 0.9566896265675408,
+        "n_dates": 980,
+        "median_names": 30.0,
+        "null_median": 0.125,
+        "warn_bar": 0.3,
+        "fail_bar": 0.5
+      }
+    },
+    {
+      "check": "leakage.perfect_rank_dates",
+      "status": "fail",
+      "severity": "critical",
+      "message": "975 of 980 dates rank the future return almost perfectly (|IC| >= 0.90), e.g. 2018-01-29, 2018-01-30, 2018-01-31 - the count exceeds the noise bound 3.0; the target is inside the signal",
+      "remediation": "Inspect the feature pipeline for the forward return entering the signal (mis-shifted labels, joins on future dates, the target used in scaling); fix the shift and regenerate signals.",
+      "details": {
+        "n_perfect": 975,
+        "n_dates": 980,
+        "min_names": 8,
+        "example_dates": [
+          "2018-01-29",
+          "2018-01-30",
+          "2018-01-31"
+        ],
+        "expected_noise_dates": 0.0,
+        "noise_bound": 3.0,
+        "cluster_factor": 1.0,
+        "label_horizon": 1
+      }
+    },
+    {
+      "check": "leakage.signal_target_identity",
+      "status": "fail",
+      "severity": "critical",
+      "message": "median per-date Pearson corr of the cross-sectionally standardized signal vs the 1-period forward return = 0.971, median |corr| = 0.971 (100% of dates with |corr| >= 0.95) - the signal is an affine transform of the target",
+      "remediation": "The signal reproduces the target up to shift/scale (negative or date-varying scale included) - remove the forward return (or any transform of it) from the feature set and from any normalization step, then rebuild the signal causally.",
+      "details": {
+        "median_corr": 0.9706478484700034,
+        "median_abs_corr": 0.9706478484700034,
+        "frac_dates_above": 1.0,
+        "n_dates": 980
+      }
+    },
+    {
+      "check": "leakage.ic_outlier_dates",
+      "status": "fail",
+      "severity": "critical",
+      "message": "980 of 980 dates have |IC| >= 0.40 against the de-factored forward return (market beta removed) vs ~31.1 expected under the exact breadth- and tie-aware null (fires above 54), e.g. 2018-01-29, 2018-01-30, 2018-01-31 - the target leaks into the signal on a subset of dates (median-based statistics cannot see intermittent leaks)",
+      "remediation": "Find what distinguishes the outlier dates (rebalance days, data-vendor restatements, events) - some feature is computed from the label window on exactly those days; re-lag it and regenerate signals.",
+      "details": {
+        "observed_outliers": 980,
+        "expected_under_null": 31.1,
+        "noise_bound": 54,
+        "outlier_bar": 0.4,
+        "n_dates": 980,
+        "mean_ic": 0.9293,
+        "median_local_center": 0.0,
+        "max_local_center": 0.0,
+        "dispersion_scale": 1.0,
+        "defactor_pcs": 0,
+        "n_tied_dates": 0,
+        "cluster_factor": 1.0,
+        "label_horizon": 1,
+        "n_raw_outlier_dates": 980,
+        "example_dates": [
+          "2018-01-29",
+          "2018-01-30",
+          "2018-01-31"
+        ]
+      }
+    },
+    {
+      "check": "contamination.split_declared",
+      "status": "pass",
+      "severity": "info",
+      "message": "train_period 2018-01-02..2020-04-21 (601 periods) and test_period 2020-04-28..2021-11-01 (395 periods) declared over a 1000-period sample (declared windows audited against the supplied panel; actual fit provenance is outside this static family's reach)",
+      "remediation": "",
+      "details": {
+        "n_train": 601,
+        "n_test": 395,
+        "n_periods": 1000
+      }
+    },
+    {
+      "check": "contamination.split_overlap",
+      "status": "pass",
+      "severity": "info",
+      "message": "0 of 1000 common-index periods fall in both windows (train 601 periods, test 395 periods)",
+      "remediation": "",
+      "details": {
+        "n_overlap": 0,
+        "n_train": 601,
+        "n_test": 395
+      }
+    },
+    {
+      "check": "contamination.insufficient_embargo",
+      "status": "pass",
+      "severity": "info",
+      "message": "4 periods between train end and test start >= required embargo of 1 (label_horizon=1)",
+      "remediation": "",
+      "details": {
+        "gap": 4,
+        "needed": 1
+      }
+    },
+    {
+      "check": "contamination.test_before_train",
+      "status": "pass",
+      "severity": "info",
+      "message": "test window ends 2021-11-01, after the training window starts 2018-01-02 - evaluation data does not wholly precede parameter selection",
+      "remediation": "",
+      "details": {
+        "train_start": "2018-01-02",
+        "test_end": "2021-11-01"
+      }
+    },
+    {
+      "check": "contamination.split_coverage",
+      "status": "pass",
+      "severity": "info",
+      "message": "test window has 395 periods (39.5% of sample, >= 60 required); train window has 601 in-data periods (>= 60 required); train+test cover 99.6% of the 1000-period sample",
+      "remediation": "",
+      "details": {
+        "n_test": 395,
+        "needed_test": 60,
+        "n_train": 601,
+        "needed_train": 60,
+        "coverage_frac": 0.996,
+        "train_frac": 0.601,
+        "test_frac": 0.395
+      }
+    },
+    {
+      "check": "survivorship.trading_outside_universe",
+      "status": "pass",
+      "severity": "critical",
+      "message": "no position is entered, increased, or sign-flipped on an asset outside the universe at decision time (t - signal_lag=1) across 28374 nonzero cells over 1000 periods. The first 1 row(s) predate the in-sample decision history and are treated as legal.",
+      "remediation": "",
+      "details": {
+        "n_violations": 0,
+        "n_active_cells": 0,
+        "n_zombie_cells": 0,
+        "n_holdover_cells": 0,
+        "n_sign_flip_cells": 0,
+        "n_position_cells": 28374,
+        "n_deadbar_fresh_cells": 0,
+        "n_born_outside_deadbar_cells": 0,
+        "n_undefined_drift_rows": 0,
+        "holdover_grace_bars": 21,
+        "rebalance_cadence_bars": 1,
+        "signal_lag": 1,
+        "measurable_frac": 0.999
+      }
+    },
+    {
+      "check": "survivorship.positions_on_missing_returns",
+      "status": "pass",
+      "severity": "high",
+      "message": "0 of 28374 nonzero position cells sit on NaN asset returns in terminal or > 5-bar gaps (0.0000% of gross exposure <= tolerance 1.0%) - consistent with at most one final delisting bar per dying asset.",
+      "remediation": "",
+      "details": {
+        "n_violations": 0,
+        "n_nonzero_cells": 28374,
+        "frac_missing_return": 0.0,
+        "closure_max_run_bars": 5,
+        "n_terminal_delistings": 0,
+        "delisting_bar_gross_exposure": 0.0,
+        "terminal_delisting_max_gross_exposure": 0.25,
+        "terminal_delisting_exposure_unverified": false,
+        "terminal_delisting_exposure_material": false,
+        "n_market_closure_cells": 0,
+        "n_closure_corroborated_cells": 0,
+        "n_closure_uncorroborated_cells": 0,
+        "frac_uncorroborated_closure": 0.0,
+        "closure_min_shared_dates": 3,
+        "n_marketwide_closure_dates": 0,
+        "n_marketwide_recurring_dates": 0,
+        "n_marketwide_untestable_dates": 0,
+        "n_marketwide_uncorroborated_cells": 0,
+        "n_marketwide_unverifiable_cells": 0,
+        "frac_unverifiable_marketwide": 0.0,
+        "n_marketwide_nonrecurring_dates": 0,
+        "marketwide_nonrecurring_budget": 3.9682539682539684,
+        "max_bar_gross_missing_frac": 0.0,
+        "max_bar_gross_missing_tol": 0.25,
+        "marketwide_min_closed_frac": 0.75,
+        "nonheld_coclosure_expected": 0.0,
+        "nonheld_coclosure_observed": 0,
+        "exog_bridging_z": 0.0,
+        "exog_destroyed_sr": 0.0,
+        "exog_n_runs_tested": 0,
+        "exog_testable": false,
+        "n_guard_stripped_cells": 0,
+        "corroboration_guards_fired": []
+      }
+    },
+    {
+      "check": "survivorship.no_exits",
+      "status": "pass",
+      "severity": "medium",
+      "message": "4 of 30 assets exit the universe over 115.5 member-years (3.5%/year of live membership, 4.0 calendar years) - membership looks point-in-time.",
+      "remediation": "",
+      "details": {
+        "n_exiting_assets": 4,
+        "n_assets": 30,
+        "n_grid_assets": 30,
+        "n_never_live_assets": 0,
+        "n_periods": 1000,
+        "years": 3.9682539682539684,
+        "member_years": 115.5079365079365,
+        "exit_rate_per_year": 0.03462965507764189,
+        "exit_rate_per_asset_year": 0.0336,
+        "min_exit_rate": 0.01,
+        "n_exiting_assets_raw": 4,
+        "n_exit_events": 4,
+        "n_flicker_exit_events": 0,
+        "n_unverifiable_exit_events": 0,
+        "n_mass_exit_events": 0,
+        "mass_exit_min_frac": 0.5,
+        "flicker_max_out_bars": 10
+      }
+    },
+    {
+      "check": "survivorship.full_history_universe",
+      "status": "skip",
+      "severity": "info",
+      "message": "universe artifact provided - this inference check is superseded by survivorship.no_exits.",
+      "remediation": "",
+      "details": {
+        "superseded": true
+      }
+    },
+    {
+      "check": "performance.suspicious_sharpe",
+      "status": "fail",
+      "severity": "high",
+      "message": "ann SR 76.2 (net strategy_returns) for a 252-periods/year equity alpha is not an edge, it is a bug - sustained SR>5 implies near-arbitrage (PSR vs 0 = 1.000 over 1000 periods)",
+      "remediation": "hunt for lookahead/leakage before anything else: verify the execution lag (positions.loc[t] must come from signals.loc[t-signal_lag]), check feature windows do not touch the label, and confirm costs are charged",
+      "details": {
+        "sharpe_annualized": 76.24967960839142,
+        "psr_vs_zero": 0.9999999987963025,
+        "n_obs": 1000,
+        "n_eff": 111.634362133653,
+        "dependence_variance_ratio": 8.957815325739588,
+        "n_dependent_lags": 14,
+        "periods_per_year": 252.0,
+        "returns_source": "net strategy_returns"
+      }
+    },
+    {
+      "check": "performance.deflated_sharpe",
+      "status": "skip",
+      "severity": "info",
+      "message": "pass AuditConfig(n_trials=<total configurations ever tried on this data, including abandoned ones>) - if you did not count, that is itself the finding",
+      "remediation": "",
+      "details": {}
+    },
+    {
+      "check": "performance.suspicious_ic",
+      "status": "fail",
+      "severity": "high",
+      "message": "|mean IC| vs next-1-period return = 0.957 over 980 dates (NW t=1.86e+03); real daily equity alphas run 0.01-0.05 - the signal almost certainly embeds the target",
+      "remediation": "inspect signal construction for future data: unlagged joins, feature windows overlapping the label horizon, or target-derived features; rebuild the signal point-in-time",
+      "details": {
+        "mean_ic": 0.9566896265675408,
+        "nw_tstat": 1857.6763351286183,
+        "n_dates": 980,
+        "label_horizon": 1,
+        "ic_std": 0.015379519416979853,
+        "min_ic_dates": 30,
+        "median_names": 30.0,
+        "n_nonoverlap_dates": 980,
+        "noise_se": 0.005931819989552855,
+        "horizon_multiplier": 1.0,
+        "warn_bar": 0.08,
+        "fail_bar": 0.15,
+        "n_grid_dates": 1000,
+        "usable_date_frac": 0.98,
+        "gated_stamping": false
+      }
+    },
+    {
+      "check": "performance.ic_stability",
+      "status": "pass",
+      "severity": "info",
+      "message": "100% of 918 rolling 63-day IC windows match the full-sample sign (mean IC +0.957, window range +0.950..+0.962)",
+      "remediation": "",
+      "details": {
+        "consistency": 1.0,
+        "n_windows": 918,
+        "worst_window_ic": 0.9497435897435896,
+        "best_window_ic": 0.9615445733354521,
+        "mean_ic": 0.9566896265675408,
+        "window": 63
+      }
+    },
+    {
+      "check": "performance.ic_regime_concentration",
+      "status": "pass",
+      "severity": "info",
+      "message": "date-normalized positive IC is spread across 4 calendar years; the largest (2018) carries 25% of the sum of same-sign per-year means (mean IC +0.9567)",
+      "remediation": "",
+      "details": {
+        "yearly": {
+          "2018": 230.87942157953282,
+          "2019": 249.9833147942158,
+          "2020": 250.41890962825332,
+          "2021": 206.27418803418803
+        },
+        "yearly_dates": {
+          "2018": 241,
+          "2019": 261,
+          "2020": 262,
+          "2021": 216
+        },
+        "excluded_years": [],
+        "min_year_dates": 63,
+        "n_years": 4,
+        "n_calendar_years": 4,
+        "total_ic": 937.5558340361899,
+        "mean_ic": 0.9566896265675408,
+        "yearly_mean": {
+          "2018": 0.9580058986702606,
+          "2019": 0.9577904781387578,
+          "2020": 0.9557973649933332,
+          "2021": 0.9549730927508705
+        },
+        "top_year": 2018,
+        "share": 0.2503565049536406,
+        "direction": "positive"
+      }
+    },
+    {
+      "check": "performance.sample_size",
+      "status": "pass",
+      "severity": "info",
+      "message": "1000 common periods and 1000 finite strategy_returns observations (>= 120) - adequate sample for the statistical checks in this module",
+      "remediation": "",
+      "details": {
+        "n_periods": 1000,
+        "min_periods": 120,
+        "n_strategy_obs": 1000,
+        "returns_source": "net strategy_returns"
+      }
+    },
+    {
+      "check": "costs.missing_transaction_costs",
+      "status": "pass",
+      "severity": "info",
+      "message": "net returns differ from the cost-free reconstruction by an implied one-way cost of 10.0bps per unit traded over 1000 dates (declared 10bps; mean one-sided turnover 61.4%/period; per-date drag reconciles with per-trade charging (rms residual 3.2e-18)); verified on 980 of 980 position dates (100% of traded dollars).",
+      "remediation": "",
+      "details": {
+        "mean_turnover": 0.614313603053961,
+        "max_abs_diff": 0.0016776017422349236,
+        "n_common": 1000,
+        "implied_bps": 9.999999999999998,
+        "mean_dollars_traded": 1.2040546619857635,
+        "mean_cost_drag": 0.0012040546619857633,
+        "implied_floor_bps": 0.5,
+        "declared_costs_bps": 10.0,
+        "n_live_dates": 980,
+        "n_compared_live_dates": 980,
+        "n_uncompared_trade_dates": 0,
+        "overlap_traded_share": 1.0,
+        "minimum_verified_traded_share": 0.99,
+        "drag_rms_residual": 3.1552649001349724e-18,
+        "drag_residual_scale": 0.0012258782054015273,
+        "reconcile_rel_tol": 0.25
+      }
+    },
+    {
+      "check": "costs.no_cost_declaration",
+      "status": "pass",
+      "severity": "info",
+      "message": "one-way transaction costs declared at 10bps per unit traded.",
+      "remediation": "",
+      "details": {
+        "declared_costs_bps": 10.0
+      }
+    },
+    {
+      "check": "costs.turnover_unrealistic",
+      "status": "warn",
+      "severity": "high",
+      "message": "mean one-sided turnover 61.4%/period (155x/year one-sided over the 980-bar live span of the 1000-bar grid; 979 post-entry bars, entry trade excluded - entry-inclusive mean 61.4%, the figure costs.missing_transaction_costs prices) exceeds 63x/year (= 25%/period at daily frequency); retail/IBKR-scale execution cannot support this without material slippage.",
+      "remediation": "Smooth the signal or rebalance less often; verify the edge survives the costs this turnover implies (see costs.cost_sensitivity).",
+      "details": {
+        "mean_turnover": 0.6144303687363449,
+        "p95_turnover": 0.7424393357099945,
+        "ann_turnover": 154.83645292155893,
+        "n_live_periods": 980,
+        "n_grid_periods": 1000,
+        "n_post_entry_periods": 979,
+        "mean_turnover_entry_inclusive": 0.614313603053961
+      }
+    },
+    {
+      "check": "costs.cost_sensitivity",
+      "status": "pass",
+      "severity": "info",
+      "message": "Sharpe by one-way cost: 0bps=78.70, 5bps=77.51, 10bps=76.25, 25bps=71.99 - the edge does not flip negative at 10bps.",
+      "remediation": "",
+      "details": {
+        "sr_by_bps": {
+          "0": 78.696972378032,
+          "5": 77.51077838617367,
+          "10": 76.2496796083914,
+          "25": 71.99371497871928
+        },
+        "gross_sr": 78.696972378032,
+        "mid_bps": 10.0,
+        "sr_at_mid_bps": 76.2496796083914
+      }
+    },
+    {
+      "check": "costs.price_return_consistency",
+      "status": "pass",
+      "severity": "info",
+      "message": "returns derived from artifacts.prices match asset_returns: median |diff| = 0.00bp over 29078 cells; 0.0% of cells differ by > 10bp (sparse, consistent with dividend/split adjustment points on close-only prices).",
+      "remediation": "",
+      "details": {
+        "median_abs_diff": 6.245004513516506e-17,
+        "n_cells": 29078,
+        "frac_discrepant": 0.0,
+        "n_split_sized": 0,
+        "worst_abs_diff": 3.3306690738754696e-16,
+        "worst_date": "2018-01-26 00:00:00",
+        "worst_asset": "A022",
+        "median_tol": 0.0001,
+        "point_tol": 0.001,
+        "q90_signed_diff": 1.214306433183765e-16,
+        "div_cap_per_bar": 0.0005952380952380952,
+        "median_signed_diff": 0.0,
+        "on_cent_grid": false,
+        "rounding_shaped": false,
+        "tick_median_scale": 9.534273822016238e-05,
+        "frac_cells_quantized": 0.0,
+        "n_return_cells": 29078,
+        "frac_return_cells_covered": 1.0,
+        "n_assets_total": 30,
+        "n_assets_compared": 30,
+        "n_assets_discrepant_median": 0,
+        "n_assets_any_compared_cell": 30,
+        "n_assets_mismatched": 0,
+        "mismatched_assets": []
+      }
+    },
+    {
+      "check": "dynamic.placebo_pipeline_bias",
+      "status": "pass",
+      "severity": "info",
+      "message": "50 placebo AR(1) signal panels (phi=0.13) run through the pipeline earn mean annualized SR -4.35 net of market exposure (std 0.52, t=-58.7) - no manufactured performance; a slightly negative mean is the expected transaction-cost drag",
+      "remediation": "",
+      "details": {
+        "n": 50,
+        "mean_null": -4.349123481420862,
+        "std_null": 0.5238868464214321,
+        "t": -58.70150638324038,
+        "phi": 0.13012714767786243,
+        "n_finite": 50,
+        "n_degenerate_pos": 0,
+        "n_degenerate_neg": 0,
+        "mean_null_raw": -4.347345477634745,
+        "placebo_kind": "ar1",
+        "activity": null
+      }
+    },
+    {
+      "check": "dynamic.placebo_percentile",
+      "status": "pass",
+      "severity": "info",
+      "message": "actual annualized SR 76.54 net of market exposure (raw 76.25) sits at the 100th percentile of 50 random-signal outcomes hedged the same way (null 5/50/95% = -5.11/-4.40/-3.59); plus-one randomization p=0.020 clears alpha=0.05 and the 95% bar",
+      "remediation": "",
+      "details": {
+        "actual_sr": 76.53612046797964,
+        "percentile": 1.0,
+        "p_value": 0.0196078431372549,
+        "alpha": 0.050000000000000044,
+        "n": 50,
+        "n_tied": 0,
+        "n_exceed": 0,
+        "best_possible_p_value": 0.0196078431372549,
+        "min_null_runs": 20,
+        "resolution_sufficient": true,
+        "p_value_method": "plus_one_randomization",
+        "null_q05": -5.112666188293076,
+        "null_q50": -4.395835811428057,
+        "null_q95": -3.590466926417708,
+        "sr_basis": "hedged",
+        "actual_sr_raw": 76.2496796083914,
+        "null_q05_raw": -5.110873988759792,
+        "null_q50_raw": -4.393616569179102,
+        "null_q95_raw": -3.592086558425622,
+        "actual_sr_hedged": 76.53612046797964,
+        "null_q50_hedged": -4.395835811428057,
+        "n_hedge_dust": 0
+      }
+    },
+    {
+      "check": "dynamic.shuffled_labels",
+      "status": "pass",
+      "severity": "info",
+      "message": "actual annualized SR 76.54 net of market exposure beats 50 shuffled-label nulls (mean null -4.14) with plus-one block-randomization p=0.020",
+      "remediation": "",
+      "details": {
+        "p_value": 0.0196078431372549,
+        "actual_sr": 76.53612046797964,
+        "mean_null": -4.136062642271111,
+        "n": 50,
+        "actual_sr_raw": 76.2496796083914,
+        "mean_null_raw": -4.131637680951298,
+        "mean_null_xsec": -4.460274061532319,
+        "p_value_xsec": 0.0196078431372549,
+        "n_xsec": 50,
+        "xsec_trusted": true,
+        "shuffle_block_len": 1,
+        "shuffle_block_auto": true,
+        "returns_lag1_autocorr": 0.0004754783994095514,
+        "returns_lag1_abs_autocorr": 0.016874852244365263,
+        "returns_squared_lag1_abs_autocorr": 0.021081415209817253,
+        "returns_block_dependence": 0.021081415209817253,
+        "shuffle_p_value_method": "plus_one_block_randomization",
+        "shuffle_null_assumption": "contiguous return blocks are approximately exchangeable at the selected length; automatic length is a conservative lag-1 level/squared-return heuristic, not a universal time-series calibration"
+      }
+    },
+    {
+      "check": "dynamic.date_shift",
+      "status": "fail",
+      "severity": "critical",
+      "message": "peeking one bar EARLIER destroys the strategy (annualized SR 76.2 -> 0.3 at shift k=-1, remnant below 25% of baseline; curve: -3: 0.29, -2: 0.32, -1: 0.34, +0: 76.25, +1: -2.96, +2: -2.94, +3: -3.11) - the edge is welded to exactly the executed bar: the signature of a signal that embeds that bar's return. (A near-zero-autocorrelation ultra-fast alpha leaves the same sub-commensurate remnant; only the causality probes can adjudicate, and they did not run.)",
+      "remediation": "Pass signal_func and artifacts.signal_input so the causality probes can adjudicate; if all three stamp the signal causal, quantify its autocorrelation and horizon instead. Otherwise rebuild the signal from data available strictly before the executed bar: audit every feature for use of the bar-t return/price (same-day close, unshifted forward returns, labels joined on the wrong date) and re-run the backtest with the corrected, lagged signal.",
+      "details": {
+        "curve": {
+          "-3": 0.2858327556830117,
+          "-2": 0.32226628145931263,
+          "-1": 0.33938306220872866,
+          "0": 76.2496796083914,
+          "1": -2.9596280929408714,
+          "2": -2.9404117384513184,
+          "3": -3.1071705401011207
+        },
+        "sr_baseline": 76.2496796083914,
+        "sr_peek_1": 0.33938306220872866,
+        "sr_delay_1": -2.9596280929408714,
+        "date_shift_max": 3,
+        "peek_signature": "evaporation",
+        "signal_verified_causal": false,
+        "peek_anti_corr_bar_sr": -38.1248398041957,
+        "peek_noise_floor_sr": 0.5019960159204453,
+        "n_baseline_obs": 1000
+      }
+    },
+    {
+      "check": "dynamic.signal_reproducibility",
+      "status": "skip",
+      "severity": "info",
+      "message": "pass signal_func(signal_input) -> signals DataFrame AND artifacts.signal_input (the raw data panel signal_func consumes) to enable this check; missing: signal_func.",
+      "remediation": "",
+      "details": {}
+    },
+    {
+      "check": "dynamic.rolling_window_integrity",
+      "status": "skip",
+      "severity": "info",
+      "message": "pass signal_func(signal_input) -> signals DataFrame AND artifacts.signal_input (the raw data panel signal_func consumes) to enable this check; missing: signal_func.",
+      "remediation": "",
+      "details": {}
+    },
+    {
+      "check": "dynamic.signal_input_sensitivity",
+      "status": "skip",
+      "severity": "info",
+      "message": "pass signal_func(signal_input) -> signals DataFrame AND artifacts.signal_input (the raw data panel signal_func consumes) to enable this check; missing: signal_func.",
+      "remediation": "",
+      "details": {}
+    }
+  ]
+}

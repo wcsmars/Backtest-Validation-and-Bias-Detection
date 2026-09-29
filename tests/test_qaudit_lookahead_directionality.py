@@ -238,8 +238,12 @@ class TestFutureVolSizingAsymmetricEstimators:
     def test_fvs_control_grid_pinned(self):
         # Literal grid pins, mirroring test_band_constants_pinned: a
         # refactor must not shrink the control grid silently - each member
-        # covers an honest sizing family (see the grid comment).
-        assert lookahead.FWD_VOL_EWMA_HALFLIVES == (5, 10, 20, 40, 60)
+        # covers an honest sizing family (see the grid comment). hl120
+        # replaced hl60 (still bracketed by hl40, hl120 and the 60d window):
+        # honest hl90/hl120 risk parity on mixed-vol panels drew WARN or
+        # FAIL against the hl60-capped grid (TestFutureVolSizingLongMemory).
+        # Adding a member instead raises the names floor (n_controls + 3).
+        assert lookahead.FWD_VOL_EWMA_HALFLIVES == (5, 10, 20, 40, 120)
         assert lookahead.FWD_VOL_CONTROL_WINDOWS == (15, 20, 30, 40, 60)
         assert lookahead.FWD_VOL_SEMIVOL_WINDOWS == (20, 60)
         assert lookahead.FWD_VOL_ABSRET_HALFLIFE == 15
@@ -266,6 +270,58 @@ class TestFutureVolSizingAsymmetricEstimators:
         assert r.status is Status.FAIL
         assert r.severity is Severity.CRITICAL
         assert r.details["mean_partial_corr"] < lookahead.FWD_VOL_PARTIAL_FAIL
+
+
+def _mixed_vol_garch(seed, n_assets=40, n_periods=1200, garch_a=0.09,
+                     garch_b=0.89):
+    """GARCH(1,1) idiosyncratic volatility around per-name long-run levels
+    drawn from 1.2%..3.5% a day, plus a common market factor."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2019-01-02", periods=n_periods)
+    var0 = rng.uniform(0.012, 0.035, n_assets) ** 2
+    omega = var0 * (1.0 - garch_a - garch_b)
+    h = var0.copy()
+    z = rng.normal(size=(n_periods, n_assets))
+    idio = np.zeros((n_periods, n_assets))
+    beta = rng.uniform(0.7, 1.3, n_assets)
+    mkt = rng.normal(2e-4, 0.010, n_periods)
+    for t in range(n_periods):
+        eps = np.sqrt(h) * z[t]
+        idio[t] = eps
+        h = omega + garch_a * eps ** 2 + garch_b * h
+    return pd.DataFrame(idio + np.outer(mkt, beta), index=dates,
+                        columns=[f"A{i:03d}" for i in range(n_assets)])
+
+
+class TestFutureVolSizingLongMemory:
+    # Long-memory EWMA risk models on a panel whose names differ in
+    # long-run vol: the long filter tracks the persistent per-name level
+    # better than an hl60-capped control grid, which read honest hl90 risk
+    # parity as anticipation (seed 1: -0.059, NW t -5.0, WARN; seed 9:
+    # -0.087, NW t -7.4, FAIL CRITICAL).
+
+    @pytest.mark.parametrize("seed", [1, 9])
+    def test_long_halflife_ewma_risk_parity_passes(self, seed):
+        rets = _mixed_vol_garch(seed)
+        vol = rets.pow(2).ewm(halflife=90, min_periods=60).mean().pow(0.5)
+        r = lookahead._future_vol_sizing(
+            _arts(rets, momentum_signal(rets), _inv_book(vol.shift(1))), CFG)
+        assert r.status is Status.PASS
+        assert r.details["mean_partial_corr"] \
+            > 0.5 * lookahead.FWD_VOL_PARTIAL_WARN
+
+    def test_partial_forward_sizer_still_fails(self):
+        # detection guard on the same panel: 25% of the risk estimate is
+        # the forward 10-bar vol
+        rets = _mixed_vol_garch(9)
+        fwd = rets.rolling(10, min_periods=10).std().shift(-10)
+        trail = rets.rolling(20, min_periods=20).std().shift(1)
+        r = lookahead._future_vol_sizing(
+            _arts(rets, momentum_signal(rets),
+                  _inv_book(0.25 * fwd + 0.75 * trail)), CFG)
+        assert r.status is Status.FAIL
+        assert r.severity is Severity.CRITICAL
+        assert r.details["mean_partial_corr"] < 2 * lookahead.FWD_VOL_PARTIAL_FAIL
 
 
 # ---------------------------------------------------------------------------

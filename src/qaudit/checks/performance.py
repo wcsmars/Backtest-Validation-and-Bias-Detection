@@ -26,6 +26,8 @@ letting a NaN Sharpe read as a clean SKIP.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -47,6 +49,17 @@ _IC_STABILITY_MIN_WINDOWS = 4
 _MIN_YEARS_FOR_REGIME = 3
 
 _REGIME_MIN_ABS_MEAN_IC = 0.005
+
+# Regime concentration compares per-year mean IC, so a year's weight does
+# not scale with how many of its dates the book covers (summed IC would
+# make a stationary edge over Nov 2019 to Feb 2021 read as ~80% from 2020).
+# A year holding less than this fraction of a year's worth of IC dates, at
+# the book's own IC density (usable IC dates / calendar periods between the
+# first and last usable IC date, so a gated weekly export is judged on its
+# own cadence and an empty warm-up does not dilute it), is a stub: its mean is
+# too noisy to compare and it is excluded from both n_years and the share.
+# 0.25 is a quarter: 63 dates on a continuous daily book.
+_REGIME_MIN_YEAR_FRACTION = 0.25
 
 # Noise-SE multiplier for the stability and regime gates: 2.5 SE is a
 # ~1% two-sided false-positive rate under the no-edge null, while an edge
@@ -111,6 +124,15 @@ _DRAG_RECONCILE_REL_TOL = 0.25
 
 # Minimum overlap for cost-drag reconciliation.
 _DRAG_MIN_OBS = 30
+
+# When the drag reconciles only at the implied cost, a declaration off by
+# more than this factor either way (one-way vs round-trip is 2x) is named
+# in the PASS message as a misstated cost, pointing the reader at
+# costs.missing_transaction_costs.
+_DECLARED_COST_NOTE_FACTOR = 1.5
+# The '(one-way vs round-trip?)' hint is shown only up to this ratio; a
+# larger misstatement cannot come from that mix-up alone.
+_ROUND_TRIP_HINT_MAX_FACTOR = 3.0
 
 # Below 30 finite returns, skip Sharpe judgments: random 5-29-bar slices
 # of the bundled honest SR-1.3 book clear the 5.0 FAIL bar a fifth to
@@ -224,11 +246,19 @@ def _cost_drag_explanation(strat, artifacts, ppy: float):
     """Negative-branch discriminator: can the net book's loss be explained as
     deterministic transaction-cost drag?  Measures the gross reconstruction
     (positions x asset_returns) and reconciles per-period (gross - net)
-    against dollars traded x a plausible one-way cost (the declared bps when
-    on record, else the implied cost, which must clear the costs-module
-    economic-plausibility band). Returns ``(gross_sr, info)``: ``gross_sr``
-    is None when the discriminator cannot run (net or positions missing, or
-    too little overlap); ``info`` is a dict only when the drag reconciles."""
+    against dollars traded x a plausible one-way cost. Candidate costs are
+    tried in order: the declared bps when on record, then the implied cost
+    mean(drag) / mean(dollars traded); each must clear the costs-module
+    economic-plausibility band and the same residual gate. The implied-cost
+    fallback adds no pass path beyond the no-declaration case: a declaration
+    that misstates the charged cost (one-way vs round-trip is a factor of 2)
+    is a cost-reporting error for costs.missing_transaction_costs, not
+    evidence of a sign flip. Returns ``(gross_sr, info)``: ``gross_sr`` is
+    None when the discriminator cannot run (net or positions missing, or too
+    little overlap); ``info`` is a dict only when the drag reconciles, and
+    records ``declared_costs_bps`` (as declared, including an explicit 0) and
+    whether the declared cost itself reconciled (``declared_cost_reconciled``;
+    a declared 0 is never a candidate and never reconciles)."""
     if artifacts.strategy_returns is None or artifacts.positions is None:
         return None, None
     gross = gross_strategy_returns(artifacts.positions, artifacts.asset_returns)
@@ -260,25 +290,35 @@ def _cost_drag_explanation(strat, artifacts, ppy: float):
     drag = g - net
     mean_drag = float(drag.mean())
     mean_dollars = float(dollars.mean())
+    if mean_drag <= 0:
+        return gross_sr, None
     declared = artifacts.declared_costs_bps
-    if declared is not None and declared > 0:
-        c = float(declared) * 1e-4
-    else:
-        if mean_dollars <= 0 or mean_drag <= 0:
-            return gross_sr, None
-        c = mean_drag / mean_dollars              # implied one-way cost
-    if not (MIN_PLAUSIBLE_ONE_WAY_BPS * 1e-4 <= c
-            <= MAX_PLAUSIBLE_ONE_WAY_BPS * 1e-4):
-        return gross_sr, None
-    resid = (drag - c * dollars).to_numpy(dtype=float)
-    rms_resid = float(np.sqrt(np.mean(np.square(resid))))
-    scale = c * float(np.sqrt(np.mean(np.square(dollars.to_numpy(dtype=float)))))
-    if mean_drag <= 0 or scale <= 0 or rms_resid > _DRAG_RECONCILE_REL_TOL * scale:
-        return gross_sr, None
-    return gross_sr, dict(implied_one_way_bps=c * 1e4,
-                          mean_drag_per_period=mean_drag,
-                          mean_dollars_traded=mean_dollars,
-                          drag_rms_residual=rms_resid, n_common=n_common)
+    has_declared = declared is not None and declared > 0
+    candidates = []
+    if has_declared:
+        candidates.append(float(declared) * 1e-4)
+    if mean_dollars > 0:
+        candidates.append(mean_drag / mean_dollars)   # implied one-way cost
+    rms_dollars = float(np.sqrt(np.mean(np.square(dollars.to_numpy(dtype=float)))))
+    for i, c in enumerate(candidates):
+        if not (MIN_PLAUSIBLE_ONE_WAY_BPS * 1e-4 <= c
+                <= MAX_PLAUSIBLE_ONE_WAY_BPS * 1e-4):
+            continue
+        resid = (drag - c * dollars).to_numpy(dtype=float)
+        rms_resid = float(np.sqrt(np.mean(np.square(resid))))
+        scale = c * rms_dollars
+        if scale <= 0 or rms_resid > _DRAG_RECONCILE_REL_TOL * scale:
+            continue
+        return gross_sr, dict(implied_one_way_bps=c * 1e4,
+                              declared_costs_bps=(float(declared)
+                                                  if declared is not None
+                                                  else None),
+                              declared_cost_reconciled=bool(has_declared
+                                                            and i == 0),
+                              mean_drag_per_period=mean_drag,
+                              mean_dollars_traded=mean_dollars,
+                              drag_rms_residual=rms_resid, n_common=n_common)
+    return gross_sr, None
 
 
 def _degenerate_series(strat) -> tuple[bool, float, int]:
@@ -387,6 +427,27 @@ def _suspicious_sharpe(strat, source, artifacts, config) -> CheckResult:
         if drag_info is not None and gross_sr is not None \
                 and abs(gross_sr) < config.sharpe_warn:
             details.update(drag_info)
+            charged = drag_info["implied_one_way_bps"]
+            declared = drag_info["declared_costs_bps"]
+            declared_note = ""
+            if declared is not None and not drag_info["declared_cost_reconciled"]:
+                ratio = (max(charged / declared, declared / charged)
+                         if declared > 0 else float("inf"))
+                if not np.isfinite(ratio):
+                    misstated = (" and the declaration of zero cost omits it: "
+                                 "see costs.missing_transaction_costs")
+                elif ratio > _DECLARED_COST_NOTE_FACTOR:
+                    # Only a ratio near 2 reads as a one-way vs round-trip mix-up.
+                    hint = (" (one-way vs round-trip?)"
+                            if ratio <= _ROUND_TRIP_HINT_MAX_FACTOR else "")
+                    misstated = (f" and the declaration is misstated by "
+                                 f"{ratio:.1f}x{hint}: see "
+                                 f"costs.missing_transaction_costs")
+                else:
+                    misstated = ""
+                declared_note = (
+                    f"; the declared {declared:g}bps does not reconcile, so "
+                    f"the drag is priced at the implied cost{misstated}")
             return passed(
                 check,
                 f"ann net SR {sr:.1f} ({source}) is deterministic cost drag, "
@@ -394,11 +455,11 @@ def _suspicious_sharpe(strat, source, artifacts, config) -> CheckResult:
                 f"positions x asset_returns has ann SR {gross_sr:+.2f} (inside "
                 f"the +/-{config.sharpe_warn:g} honest range) and per-period "
                 f"(gross - net) reconciles with dollars traded x "
-                f"{drag_info['implied_one_way_bps']:.1f}bps one-way (mean drag "
+                f"{charged:.1f}bps one-way (mean drag "
                 f"{drag_info['mean_drag_per_period'] * 1e4:.1f}bp/period over "
-                f"{drag_info['n_common']} periods) - no edge, and the book "
-                f"churns it away; see costs.turnover_unrealistic and "
-                f"costs.cost_sensitivity",
+                f"{drag_info['n_common']} periods){declared_note} - no edge, "
+                f"and the book churns it away; see costs.turnover_unrealistic "
+                f"and costs.cost_sensitivity",
                 details=details)
     if abs(sr) >= config.sharpe_fail:
         if sr < 0:
@@ -803,13 +864,33 @@ def _ic_regime_concentration(ic, artifacts, config) -> CheckResult:
     check = "performance.ic_regime_concentration"
     ic_valid = ic.dropna()
     if len(ic_valid):
-        yearly = ic_valid.groupby(ic_valid.index.year).sum()
+        grouped = ic_valid.groupby(ic_valid.index.year)
+        yearly = grouped.sum()
+        yearly_mean = grouped.mean()
+        yearly_n = grouped.size()
     else:
-        yearly = pd.Series(dtype=float)
+        yearly = yearly_mean = pd.Series(dtype=float)
+        yearly_n = pd.Series(dtype=int)
     yearly_dict = {int(y): float(v) for y, v in yearly.items()}
-    n_years = int(len(yearly))
-    total = float(yearly.sum()) if n_years else 0.0
+    yearly_dates = {int(y): int(v) for y, v in yearly_n.items()}
+    n_calendar_years = int(len(yearly))
+    total = float(yearly.sum()) if n_calendar_years else 0.0
     mean_ic = float(ic_valid.mean()) if len(ic_valid) else float("nan")
+    # Stub years (a partial first/last year, or a year the book barely
+    # covers) hold too few IC dates to compare; the threshold is a quarter
+    # of a year at the book's own IC density (see _REGIME_MIN_YEAR_FRACTION).
+    # Density is measured over the IC series' own span (first to last usable
+    # date), so a long empty warm-up or tail does not lower the threshold.
+    span = (ic.loc[ic_valid.index[0]:ic_valid.index[-1]] if len(ic_valid)
+            else ic)
+    density = len(ic_valid) / len(span) if len(span) else 0.0
+    min_year_dates = max(2, int(np.ceil(_REGIME_MIN_YEAR_FRACTION
+                                        * float(artifacts.periods_per_year)
+                                        * density)))
+    judged = yearly_n >= min_year_dates
+    excluded_years = [int(y) for y in yearly_n.index[~judged.to_numpy()]]
+    yearly_mean = yearly_mean[judged]
+    n_years = int(len(yearly_mean))
     # The concentration question is polarity-blind: a negative-IC edge (a
     # signal traded inverted, or a sign-flipped construction) concentrated in
     # one year is exactly as much a regime bet as a positive one, so judge
@@ -819,40 +900,61 @@ def _ic_regime_concentration(ic, artifacts, config) -> CheckResult:
     # regime finding. The gate is noise-SE-scaled (see _ic_moot_floor).
     moot_floor = (_ic_moot_floor(ic, artifacts) if len(ic_valid)
                   else _REGIME_MIN_ABS_MEAN_IC)
-    if (n_years < _MIN_YEARS_FOR_REGIME or not np.isfinite(mean_ic)
-            or abs(mean_ic) <= moot_floor):
+    mean_sum = float(yearly_mean.sum()) if n_years else 0.0
+    sign = 1.0 if mean_sum > 0 else -1.0
+    aligned = yearly_mean * sign            # per-year mean IC in the edge's direction
+    contrib = aligned[aligned > 0]
+    base: dict[str, Any] = dict(yearly=yearly_dict, yearly_dates=yearly_dates,
+                excluded_years=excluded_years, min_year_dates=min_year_dates,
+                n_years=n_years, n_calendar_years=n_calendar_years,
+                total_ic=total, mean_ic=mean_ic)
+    too_few_years = n_years < _MIN_YEARS_FOR_REGIME or not len(contrib)
+    no_edge = not np.isfinite(mean_ic) or abs(mean_ic) <= moot_floor
+    if too_few_years or no_edge:
+        reasons = []
+        if too_few_years:
+            stub_note = (f" ({len(excluded_years)} stub year(s) "
+                         f"{excluded_years} with < {min_year_dates} IC dates "
+                         f"excluded)" if excluded_years else "")
+            reasons.append(f"{n_years} of {n_calendar_years} calendar "
+                           f"year(s) hold enough IC dates to compare"
+                           f"{stub_note}; need >= {_MIN_YEARS_FOR_REGIME}")
+        if not np.isfinite(mean_ic):
+            reasons.append("mean IC undefined (no usable IC dates)")
+        elif no_edge:
+            reasons.append(f"|mean IC| {abs(mean_ic):.4f} is <= the "
+                           f"{moot_floor:.4f} noise-scaled floor (max of "
+                           f"{_REGIME_MIN_ABS_MEAN_IC:g} absolute and "
+                           f"{_IC_MOOT_GATE_Z:g} x the breadth/depth mean-IC "
+                           f"SE) - no edge detectable above noise")
+        else:
+            reasons.append(f"|mean IC| {abs(mean_ic):.4f} clears the "
+                           f"{moot_floor:.4f} noise-scaled floor")
         return passed(
             check,
-            f"regime concentration not judged: {n_years} calendar year(s) with "
-            f"|mean IC| {abs(mean_ic):.4f} (cumulative {total:+.2f}); need >= "
-            f"{_MIN_YEARS_FOR_REGIME} years and |mean IC| > the "
-            f"{moot_floor:.4f} noise-scaled floor (max of "
-            f"{_REGIME_MIN_ABS_MEAN_IC:g} absolute and {_IC_MOOT_GATE_Z:g} x "
-            f"the breadth/depth mean-IC SE) - no edge detectable above noise "
-            f"whose concentration could be judged",
-            yearly=yearly_dict, n_years=n_years, total_ic=total,
-            mean_ic=mean_ic, moot_floor=moot_floor, not_judged=True)
-    sign = 1.0 if total > 0 else -1.0
+            f"regime concentration not judged: {'; '.join(reasons)} "
+            f"(cumulative IC {total:+.2f})",
+            **base, moot_floor=moot_floor, not_judged=True)
     direction = "positive" if sign > 0 else "negative"
-    aligned = yearly * sign                 # per-year contribution in the edge's direction
-    contrib = aligned[aligned > 0]
     top_year = int(contrib.idxmax())
-    top = float(yearly.loc[top_year])       # signed, for the message
+    top = float(yearly_mean.loc[top_year])  # signed, for the message
     same_sign_sum = float(sign * contrib.sum())
     share = float(contrib.max() / contrib.sum())
-    details = dict(yearly=yearly_dict, top_year=top_year, share=share,
-                   n_years=n_years, total_ic=total, mean_ic=mean_ic,
-                   direction=direction)
+    details = dict(base, yearly_mean={int(y): float(v)
+                                      for y, v in yearly_mean.items()},
+                   top_year=top_year, share=share, direction=direction)
+    excl_note = (f"; stub year(s) {excluded_years} with < {min_year_dates} "
+                 f"IC dates excluded" if excluded_years else "")
     if share > config.ic_regime_share_warn:
         polarity_note = ("" if sign > 0 else
                          f" (negative-polarity edge, mean IC {mean_ic:+.3f} - "
                          f"the same regime question applies to the inverted book)")
         return warned(
             check,
-            f"{share:.0%} of the cumulative {direction} IC comes from {top_year} "
-            f"alone (IC sum {top:+.1f} of the {same_sign_sum:+.1f} same-sign total "
-            f"across {n_years} years) - regime bet, not persistent "
-            f"alpha{polarity_note}",
+            f"{share:.0%} of the date-normalized {direction} IC comes from "
+            f"{top_year} alone (its mean IC {top:+.3f} of the {same_sign_sum:+.3f} "
+            f"sum of same-sign per-year means across {n_years} years"
+            f"{excl_note}) - regime bet, not persistent alpha{polarity_note}",
             severity=Severity.MEDIUM,
             remediation=f"re-run the backtest excluding {top_year}; if the edge "
                         f"disappears, treat this as a one-regime bet - size it "
@@ -860,9 +962,9 @@ def _ic_regime_concentration(ic, artifacts, config) -> CheckResult:
             details=details)
     return passed(
         check,
-        f"cumulative {direction} IC is spread across {n_years} calendar years; the "
-        f"largest ({top_year}) carries {share:.0%} of the same-sign total (mean IC "
-        f"{mean_ic:+.4f})",
+        f"date-normalized {direction} IC is spread across {n_years} calendar "
+        f"years; the largest ({top_year}) carries {share:.0%} of the sum of "
+        f"same-sign per-year means (mean IC {mean_ic:+.4f}{excl_note})",
         details=details)
 
 

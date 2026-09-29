@@ -42,8 +42,10 @@ import numpy as np
 import pandas as pd
 from scipy import stats as sps
 
-from .._stats import (cross_sectional_ic, fmt_tstat, forward_returns,
-                      newey_west_se as _nw_se, newey_west_tstat)
+from .._stats import (REBALANCE_ABS_TOL, REBALANCE_REL_TOL,
+                      cross_sectional_ic, drifted_weights, fmt_tstat,
+                      forward_returns, newey_west_se as _nw_se,
+                      newey_west_tstat, rebalance_rows)
 from ..config import AuditConfig
 from ..inputs import BacktestArtifacts
 from ..types import CheckResult, Severity, failed, passed, skipped, warned
@@ -495,6 +497,13 @@ BLEED_LAG2_TRAIL_WINDOWS = (5, 10)
 #: honest tail; intermittent bleeds measure 3.6-7.1%. Lag >= 2 honest
 #: books reach ~1.5% (the joint projection eats df), too close to gate -
 #: lag-1 only.
+#:
+#: Extreme mass whose pooled t misses the co-gate is reported unresolved,
+#: never as an all-clear: lawful dependence on the other dates can cancel a
+#: leak's extreme dates in the pooled mean. A 5% intermittent same-bar
+#: leak on a lawful anti-tilt book (mean -0.08 without it) pooled to NW t
+#: -1.8..-3.7 with ~50 extreme dates of one sign; clustered leak dates
+#: deflate the NW t as well.
 BLEED_EXTREME_DATE_Z = 4.0
 BLEED_EXTREME_FRAC = 0.02
 BLEED_EXTREME_MIN_DATES = 5
@@ -508,7 +517,8 @@ BLEED_EXTREME_MIN_DATES = 5
 #:
 #: This projection governs innovations that measurably contain same-bar
 #: return news. Return-orthogonal innovations cannot be reconstructed from
-#: these return artifacts and retain the declared signal-stamp test. Only
+#: these return artifacts and retain the declared signal-stamp test, judged
+#: after a purge of older structure only (see BLEED_SEP_ORTHO_FAIL). Only
 #: lag-1 books can reach CRITICAL through the fresh-signal projection;
 #: at larger declared lags the joint basis leaves insufficient separation
 #: from lawful multi-sleeve books. Small blends, rank-preserving changes,
@@ -538,6 +548,29 @@ BLEED_SEP_RET_MAX_LAGS = 12
 BLEED_SEP_ACF_FLOOR = 0.10
 BLEED_SEP_FRESH_MIN = 0.10
 BLEED_SEP_PARTIAL_FAIL = 0.47
+#: Return-orthogonal innovations (freshness < BLEED_SEP_FRESH_MIN:
+#: exogenous or news scores, pre-lagged exports) keep the signal-stamp
+#: test, judged on the stale purge, which removes only older returns and
+#: deeper signal lags (at lag 1 it spares r_{t-1}). A same-row blend
+#: survives it at ~0.7-1.0x its raw statistic (daily 2-5% blends
+#: +-0.34..+-0.72 either sign, pre-lagged exports +0.43..+0.86), while
+#: lawful older-lag structure does not: overlapping-tranche, two-lag and
+#: staggered books on a skip-1 short reversal measure raw -0.12..-0.29
+#: (the raw statistic alone convicts them) but purged sep -0.02..-0.095
+#: over seeds and 30-100 names. 0.15 keeps ~1.6x margin over that
+#: envelope.
+#:
+#: The cost sits in diluted blends. A 6% same-row blend with a sign error
+#: on a lawful two-lag book (lags 1 and 3 of a skip-1 10-bar reversal)
+#: purges to -0.115..-0.159 over seeds and 40-100 names and WARNs as not
+#: separable on 11 of 18 draws. The raw statistic convicted all 18, but
+#: only because the honest book's own raw bias (-0.04..-0.07) adds to a
+#: negated leak: the same blend with the correct sign measures raw
+#: +0.02..+0.04 and passes either way. 10% blends keep |sep| >= 0.185
+#: (CRITICAL). The purged statistic also needs the t gate, doubled below
+#: _MIN_PARTIAL_DATES: two 3% blends of an AR score at lag 3, with 32-34
+#: usable dates, purge to +0.19..+0.22 at NW t 7.4-7.8 and WARN.
+BLEED_SEP_ORTHO_FAIL = 0.15
 
 #: When the dependence scan saturates, locate deep dropped bars directly
 #: from per-name correlations of signal differences with lagged returns.
@@ -710,6 +743,61 @@ def _deep_bar_scan(sig: np.ndarray, ret: np.ndarray, lo: int) -> list[int]:
     return [j for _, j in found]
 
 
+# Held bars. A book refreshed weekly, monthly or every few bars holds an
+# older decision in between: its positions there are a function of
+# signal[t-L-k], and for short rolling signals that older structure shares
+# dropped bars with the same-bar innovation. Measured on every bar, honest
+# weekly 5-bar reversal books scored -0.10..-0.17 (NW t 12-43; FAIL or
+# WARN), while a monthly book that traded the same-bar signal on each
+# rebalance day pooled to -0.01 and passed: the negative held bars cancelled
+# its +0.9 rebalance bars. The statistic therefore runs only on bars where
+# the book re-decides its weights (_stats.rebalance_rows reads both hold
+# encodings, a constant target and self-financing drift, as holds). A book
+# whose weights change on every bar keeps every bar and measures as before;
+# a daily row that exactly repeats or rescales the previous one (a decile
+# book whose membership did not move) is a hold too. A held bar repeats an
+# earlier decision and cannot carry bar-t information: it adds depth to
+# monotone vouching, but a book that re-decides still needs
+# _MIN_PARTIAL_DATES_SHORT monotone rebalance dates before that evidence
+# alone vouches for it.
+#
+# The cost is sample size: a held book is judged on its rebalance dates
+# alone, about a fifth of the bars for a weekly book and a twentieth for a
+# monthly one. A lawful multi-sleeve book whose decisions sit near the
+# bleed_partial_fail bar crosses it more often on that smaller sample: a
+# 20-bar momentum book with a 20% 5-bar anti-tilt (rank-weight sleeves)
+# measures -0.07..-0.10 and passes daily, but held weekly 2-4 of 20
+# seed/breadth draws drew the "not separable" WARN, and held monthly (46
+# rebalance dates, doubled t gate) 7 of 20 came out as an unresolved PASS.
+# Declaring the composite score the book trades resolves both.
+
+def _rescaled_hold(p: np.ndarray, *refs: np.ndarray) -> bool:
+    """True when ``p`` is a positive multiple of one of ``refs`` within the
+    rebalance tolerances of :func:`qaudit._stats.rebalance_rows`.
+
+    Applied to the names of a flagged bar that are still priced on it: a
+    forced exit of a name without a return on that bar (a delisting), with
+    or without a renormalization of the survivors, changes the row but
+    re-decides none of the surviving weights. Such a bar only rescales the
+    previous row (constant-target encoding) or the drifted book
+    (actually-held encoding), so it is a hold for this rank-based
+    statistic."""
+    for ref in refs:
+        if not np.isfinite(ref).all():
+            continue
+        denom = float(ref @ ref)
+        if denom <= 0.0:
+            continue
+        scale = float(p @ ref) / denom
+        if scale <= 0.0:
+            continue
+        fit = scale * ref
+        if (np.abs(p - fit)
+                <= np.abs(fit) * REBALANCE_REL_TOL + REBALANCE_ABS_TOL).all():
+            return True
+    return False
+
+
 def _same_bar_bleed(artifacts: BacktestArtifacts,
                     config: AuditConfig) -> CheckResult:
     check = CHECK_BLEED
@@ -761,6 +849,10 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
         for jj in (db, db - 1, db + 1):
             if jj > ret_lag_max and jj not in deep_lags:
                 deep_lags.append(jj)
+    # Bars where the book re-decides its weights; on every other bar it
+    # holds an earlier decision (see the held-bar note above).
+    decided = rebalance_rows(artifacts.positions, artifacts.asset_returns)
+    drift = drifted_weights(artifacts.positions, artifacts.asset_returns)
     vals = []
     sep_stale: list[float] = []      # purge sparing r_{t-1} (stamp channel)
     sep_fresh: list[float] = []      # purge including r_{t-1} (lag-1 only)
@@ -769,6 +861,7 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
     fresh_vals: list[float] = []     # per-date corr(signal innovation, r_t ranks)
     breadths: list[int] = []
     n_monotone = 0
+    n_held = 0
     unique_fracs = []
     for t in range(lag, n):
         p, s0, sl = pos[t], sig[t], sig[t - lag]
@@ -788,6 +881,14 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
         # BLEED_MIN_UNIQUE_FRAC.
         unique_fracs.append(
             min(np.unique(s0[mask]).size, np.unique(sl[mask]).size) / m)
+        # The hold test reads only the names still priced on bar t: a name
+        # without a return there can only be exited, not re-decided. The
+        # measured cross-section keeps such names, as above.
+        priced = mask & np.isfinite(ret[t])
+        if not decided[t] or _rescaled_hold(p[priced], pos[t - 1][priced],
+                                            drift[t][priced]):
+            n_held += 1            # held bar: no decision to measure
+            continue
         # Project positions on the declared-lag signal. At lag>=2, condition the
         # signal on lag 1 and then jointly project both sides on the strictly
         # past rank/value basis to isolate same-bar information.
@@ -889,15 +990,15 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
             sep_fresh.append(v)
             expl_fresh.append(s)
     series = pd.Series(vals)
-    if not len(series) and not n_monotone:
+    if not len(series) and not n_monotone and not n_held:
         # Never measured anything: no date had >= names_floor jointly
         # finite cells (signal NaN at the declared lag, universe too
         # small) - must SKIP, not silently pass. At lag >= 2 the floor is
         # higher: the joint end-of-(t-1) projection needs df past its
         # regression columns.
         basis_req = ("" if lag == 1 else
-                     f", previous-bar signal and t-1 return history "
-                     f"(lag >= 2 basis)")
+                     ", previous-bar signal and t-1 return history "
+                     "(lag >= 2 basis)")
         return skipped(
             check,
             f"no date has >= {names_floor} assets with a finite "
@@ -906,7 +1007,7 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
             f"history that is non-NaN at the declared lag over the "
             f"traded dates (and >= {names_floor} names per date) "
             f"to enable this check.",
-            n_usable=0, n_monotone=0)
+            n_usable=0, n_monotone=0, n_held=0)
     med_unique = float(np.median(unique_fracs))
     if len(series) and med_unique < BLEED_MIN_UNIQUE_FRAC:
         # Bucketed signals retain predictable within-bucket structure. Use the
@@ -914,7 +1015,7 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
         disc_mean = float(series.mean())
         disc_t = float(newey_west_tstat(series))
         disc_details = dict(
-            n_usable=int(len(series)), n_monotone=n_monotone,
+            n_usable=int(len(series)), n_monotone=n_monotone, n_held=n_held,
             mean_partial_corr=disc_mean, nw_tstat=disc_t,
             median_unique_frac=med_unique,
             min_unique_frac=BLEED_MIN_UNIQUE_FRAC,
@@ -994,48 +1095,81 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
     if not len(series):
         # Measured degenerate everywhere. Monotone books are a good sign,
         # but the vouching needs depth: below _MIN_PARTIAL_DATES monotone
-        # dates the panel is too small to call anything.
-        if n_monotone >= _MIN_PARTIAL_DATES:
+        # dates the panel is too small to call anything. A held date adds
+        # depth but no decision, so a book that re-decides also needs
+        # _MIN_PARTIAL_DATES_SHORT monotone rebalance dates; one that never
+        # re-decides (a static or buy-and-hold book) carries no decision a
+        # bleed could enter. A book with no held dates keeps the plain
+        # 60-date rule.
+        vouched = ((not n_monotone
+                    or n_monotone >= _MIN_PARTIAL_DATES_SHORT)
+                   and n_monotone + n_held >= _MIN_PARTIAL_DATES)
+        need = f">= {_MIN_PARTIAL_DATES} such dates are needed"
+        if not n_held:
+            found = (f"positions are a monotone function of the declared "
+                     f"{basis} on "
+                     + (f"all {n_monotone} measurable dates" if vouched
+                        else f"the {n_monotone} measurable date(s)"))
+        elif n_monotone:
+            found = (f"positions are a monotone function of the declared "
+                     f"{basis} on the {n_monotone} measurable rebalance "
+                     f"date(s), and the other {n_held} measurable dates "
+                     f"only hold an earlier decision")
+            need = (f">= {_MIN_PARTIAL_DATES_SHORT} such rebalance dates "
+                    f"and >= {_MIN_PARTIAL_DATES} measurable dates in all "
+                    f"are needed")
+        else:
+            found = (f"positions never re-decide on the {n_held} "
+                     f"measurable date(s): each one only holds an earlier "
+                     f"decision")
+        if vouched:
             return passed(
                 check,
-                f"positions are a monotone function of the declared "
-                f"{basis} on all {n_monotone} measurable dates - "
-                f"no residual channel through which a same-bar bleed could "
-                f"flow",
-                n_usable=0, n_monotone=n_monotone)
+                f"{found} - no residual channel through which a same-bar "
+                f"bleed could flow",
+                n_usable=0, n_monotone=n_monotone, n_held=n_held)
         return skipped(
             check,
-            f"positions are a monotone function of the declared {basis} "
-            f"on the {n_monotone} measurable date(s), but >= "
-            f"{_MIN_PARTIAL_DATES} such dates are needed before that alone "
-            f"vouches for the book - extend the overlap of positions and "
-            f"signals to enable this check.",
-            n_usable=0, n_monotone=n_monotone)
+            f"{found}, but {need} before that alone vouches for the book "
+            f"- extend the overlap of positions and signals to enable this "
+            f"check.",
+            n_usable=0, n_monotone=n_monotone, n_held=n_held)
     if len(series) < _MIN_PARTIAL_DATES_SHORT:
         # A tiny computed sample supports neither conviction nor exoneration.
+        held_clause = (f"; {n_held} further dates only hold an earlier "
+                       f"decision" if n_held else "")
         return skipped(
             check,
             f"only {len(series)} date(s) show residual variation beyond the "
             f"declared lag-{lag} signal (need >= "
             f"{_MIN_PARTIAL_DATES_SHORT}; {n_monotone} monotone dates "
-            f"cannot vouch for the residual channel) - extend the overlap "
-            f"of positions and signals to enable this check.",
-            n_usable=int(len(series)), n_monotone=n_monotone)
+            f"cannot vouch for the residual channel{held_clause}) - extend "
+            f"the overlap of positions and signals to enable this check.",
+            n_usable=int(len(series)), n_monotone=n_monotone, n_held=n_held)
     mean = float(series.mean())
     tstat = float(newey_west_tstat(series))
     # Short samples require twice the t evidence. Test both signs because
     # negating a same-bar signal component also violates its declared timing.
     t_gate = config.bleed_tstat * (
         2.0 if len(series) < _MIN_PARTIAL_DATES else 1.0)
+    # A held book is judged on its rebalance dates only; say so wherever
+    # the date count is reported.
+    dates = (f"{len(series)} rebalance dates" if n_held
+             else f"{len(series)} dates")
     # Count extreme per-date Fisher-z values as well as their date fraction.
     # Intermittent dependence can concentrate in a few dates and leave the
     # overall mean below the ordinary level threshold.
-    z_abs = np.abs(np.arctanh(np.clip(series.to_numpy(), -0.999999,
-                                      0.999999)))
-    z_abs *= np.sqrt(np.maximum(np.asarray(breadths, dtype=float) - 3.0,
-                                1.0))
+    z_signed = np.arctanh(np.clip(series.to_numpy(), -0.999999, 0.999999))
+    z_signed *= np.sqrt(np.maximum(np.asarray(breadths, dtype=float) - 3.0,
+                                   1.0))
+    z_abs = np.abs(z_signed)
     n_extreme = int((z_abs >= BLEED_EXTREME_DATE_Z).sum())
     extreme_frac = float(n_extreme / len(series))
+    # A leak loads its dates with one sign; lawful dependence of the other
+    # sign on the remaining dates can cancel the pooled t.
+    n_extreme_pos = int((z_signed >= BLEED_EXTREME_DATE_Z).sum())
+    extreme_sign_share = (max(n_extreme_pos, n_extreme - n_extreme_pos)
+                          / n_extreme if n_extreme else 0.0)
     # Measure remaining bar-t correlation and the past-explained share.
     # The fresh-signal projection includes r_{t-1}; the stale variant retains
     # that bar so pre-lagged signal exports still respect the stamp contract.
@@ -1049,10 +1183,12 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
     f_t1_share = float(np.mean(expl_shares)) if expl_shares else 0.0
     details = dict(mean_partial_corr=mean, nw_tstat=tstat,
                    n_usable=int(len(series)), n_monotone=n_monotone,
+                   n_held=n_held,
                    median_unique_frac=med_unique, tstat_gate=t_gate,
                    n_extreme_dates=n_extreme, extreme_frac=extreme_frac,
                    extreme_date_z=BLEED_EXTREME_DATE_Z,
                    extreme_frac_gate=BLEED_EXTREME_FRAC,
+                   extreme_sign_share=extreme_sign_share,
                    sep_mean_partial_corr=sep_mean, sep_nw_tstat=sep_t,
                    f_t1_explained_share=f_t1_share,
                    sep_lag_window=sep_window,
@@ -1072,27 +1208,37 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
                    "a negated leak is still a leak.")
     if abs(mean) > config.bleed_partial_fail and abs(tstat) > t_gate:
         # Return-linked innovations need additional evidence after removing
-        # past-data structure. Return-orthogonal innovations retain the raw
-        # signal-stamp test because these artifacts cannot span their inputs.
+        # past-data structure. Return-orthogonal innovations retain the
+        # signal-stamp test, judged on the stale purge of older structure
+        # (see BLEED_SEP_ORTHO_FAIL): at lag 1 it spares r_{t-1}, the fresh
+        # bar of a pre-lagged export; at lag >= 2 the joint basis already
+        # carries r_{t-1}.
         signed = ("track" if mean > 0
                   else "track (with inverted sign)")
         core_fail = (
             f"controlling for the declared {basis}, positions still "
             f"{signed} the same-bar signal innovation (mean partial rank "
-            f"corr {mean:+.3f}, NW t {fmt_tstat(tstat)} over {len(series)} dates)")
-        if abs(freshness) < BLEED_SEP_FRESH_MIN:
+            f"corr {mean:+.3f}, NW t {fmt_tstat(tstat)} over {dates})")
+        orthogonal = abs(freshness) < BLEED_SEP_FRESH_MIN
+        purged = ("older returns (r[t-2] back) and deeper signal lags"
+                  if lag == 1 else
+                  "past returns (r[t-1] back) and deeper signal lags")
+        if (orthogonal and abs(sep_mean) > BLEED_SEP_ORTHO_FAIL
+                and abs(sep_t) > t_gate):
             return failed(
                 check,
                 core_fail + f" - part of the book is built from the signal "
                 f"of the bar it trades (signal innovation is "
                 f"return-orthogonal: freshness {freshness:+.2f} vs the "
-                f"{BLEED_SEP_FRESH_MIN:.2f} gate, so the separability "
-                f"purge has no jurisdiction and the signal-stamp contract "
-                f"governs)",
+                f"{BLEED_SEP_FRESH_MIN:.2f} gate, so the signal-stamp "
+                f"contract governs; purged of {purged} on both sides, the "
+                f"dependence still measures {sep_mean:+.3f}, NW t "
+                f"{fmt_tstat(sep_t)}, past the "
+                f"{BLEED_SEP_ORTHO_FAIL:.2f} bar)",
                 severity=Severity.CRITICAL,
                 remediation=remediation,
                 details=details)
-        if (lag == 1 and sep_spanned
+        if (lag == 1 and not orthogonal and sep_spanned
                 and abs(sep_mean) > BLEED_SEP_PARTIAL_FAIL
                 and abs(sep_t) > t_gate):
             # This conviction path requires lag 1 and a projection that reaches
@@ -1116,7 +1262,24 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
                 severity=Severity.CRITICAL,
                 remediation=remediation,
                 details=details)
-        if lag == 1 and not sep_spanned:
+        sep_tail = ""
+        if orthogonal:
+            inside = abs(sep_mean) <= BLEED_SEP_ORTHO_FAIL
+            where = (f"inside the {BLEED_SEP_ORTHO_FAIL:.2f} bar" if inside
+                     else f"past the {BLEED_SEP_ORTHO_FAIL:.2f} bar but "
+                          f"short of the |t| > {t_gate:.1f} gate")
+            sep_note = (
+                f"the innovation is return-orthogonal (freshness "
+                f"{freshness:+.2f}) and, purged of {purged} on both sides, "
+                f"measures {sep_mean:+.3f} (NW t {fmt_tstat(sep_t)}), "
+                f"{where}")
+            if inside:
+                sep_tail = (
+                    " The rest follows older signal and return structure, "
+                    "which a book that holds or blends older values of the "
+                    "signal (overlapping tranches, staggered or partial "
+                    "rebalancing, a longer-lag sleeve) tracks lawfully.")
+        elif lag == 1 and not sep_spanned:
             sep_note = (
                 f"the purge cannot certify a bar-t component at all: the "
                 f"signal's dependence window saturates the "
@@ -1146,7 +1309,7 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
             check,
             f"positions track the same-bar signal innovation beyond the "
             f"declared {basis} (mean partial rank corr {mean:+.3f}, NW t "
-            f"{fmt_tstat(tstat)} over {len(series)} dates, past the "
+            f"{fmt_tstat(tstat)} over {dates}, past the "
             f"{config.bleed_partial_fail:.2f} bar) - but {f_t1_share:.0%} "
             f"of that innovation is itself explained by strictly-past "
             f"constructions (per-bar return lags plus deeper signal lags "
@@ -1154,26 +1317,31 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
             f"sleeve tracking the signal's own past (a multi-horizon "
             f"momentum blend, a short-window reversal overlay) and a "
             f"partial same-bar leak are not separable in this artifact "
-            f"set.",
+            f"set." + sep_tail,
             severity=Severity.HIGH,
             remediation=(
-                "If the book blends several sleeves/horizons, declare the "
-                "blended CONTINUOUS composite score as artifacts.signals "
+                "If the book blends several sleeves/horizons, or averages "
+                "or smooths older values of the declared signal "
+                "(overlapping tranches, staggered or partial rebalancing, "
+                "execution smoothing), declare the blended CONTINUOUS "
+                "composite score it actually trades as artifacts.signals "
                 "(an honest composite declaration measures ~0 here; a "
                 "rank-sum composite lands in the discretized band instead) "
-                "or audit each sleeve separately. If the book truly trades "
-                "only the declared signal, treat this as a likely partial "
-                "same-bar leak: " + remediation),
+                "or audit each sleeve separately. Bars on which the book "
+                "only holds its weights are already excluded. If the book "
+                "re-decides all its weights from the declared signal "
+                "alone, treat this as a likely partial same-bar leak: "
+                + remediation),
             details=details)
     # Escalate concentrated extreme-date dependence within its supported
     # lag-1 scope. Aggregate t evidence alone also occurs with lawful overlays.
-    if (lag == 1 and len(series) >= _MIN_PARTIAL_DATES
-            and n_extreme >= BLEED_EXTREME_MIN_DATES
-            and extreme_frac >= BLEED_EXTREME_FRAC
-            and abs(tstat) > config.bleed_tstat):
+    extreme_mass = (lag == 1 and len(series) >= _MIN_PARTIAL_DATES
+                    and n_extreme >= BLEED_EXTREME_MIN_DATES
+                    and extreme_frac >= BLEED_EXTREME_FRAC)
+    if extreme_mass and abs(tstat) > config.bleed_tstat:
         return warned(
             check,
-            f"mean partial rank corr {mean:+.3f} over {len(series)} dates "
+            f"mean partial rank corr {mean:+.3f} over {dates} "
             f"sits below the {config.bleed_partial_fail:.2f} conviction "
             f"bar, but {n_extreme} dates ({extreme_frac:.1%}, vs the "
             f"{BLEED_EXTREME_FRAC:.1%} escalation gate) carry an extreme "
@@ -1192,21 +1360,44 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
     if abs(mean) > config.bleed_partial_fail:
         # A mean above the level threshold without the t co-gate is unresolved;
         # report both measurements without claiming the channel is absent.
+        held_note = (" A held book is judged on its rebalance dates alone, "
+                     "so a lawful multi-sleeve book near the bar can land "
+                     "here on a short sample; declaring the composite score "
+                     "it trades as artifacts.signals resolves that."
+                     if n_held else "")
         return passed(
             check,
             f"|mean partial rank corr| {abs(mean):.3f} (signed {mean:+.3f}) "
-            f"over {len(series)} dates clears the "
+            f"over {dates} clears the "
             f"{config.bleed_partial_fail:.2f} level bar, but the NW t "
             f"evidence ({fmt_tstat(tstat)}, need |t| > {t_gate:.1f}) is "
             f"insufficient to convict - not exonerated: clustered leak "
             f"dates deflate the NW t; treat as unresolved rather than "
-            f"clean.",
+            f"clean." + held_note,
+            details=details, unresolved=True)
+    if extreme_mass:
+        # Extreme-date mass whose pooled t misses the co-gate (see
+        # BLEED_EXTREME_DATE_Z): report it without claiming the channel is
+        # absent.
+        return passed(
+            check,
+            f"mean partial rank corr {mean:+.3f} over {dates} "
+            f"sits below the {config.bleed_partial_fail:.2f} conviction "
+            f"bar, but {n_extreme} dates ({extreme_frac:.1%}, vs the "
+            f"{BLEED_EXTREME_FRAC:.1%} escalation gate; "
+            f"{extreme_sign_share:.0%} of one sign) carry an extreme "
+            f"same-bar loading while the aggregate NW t "
+            f"{fmt_tstat(tstat)} misses the {config.bleed_tstat:.1f} "
+            f"escalation co-gate - not exonerated: lawful dependence on "
+            f"the other dates, or clustered leak dates, can hide an "
+            f"intermittent bleed from the pooled t; treat as unresolved "
+            f"rather than clean.",
             details=details, unresolved=True)
     return passed(
         check,
         f"positions carry no same-bar signal information beyond the declared "
         f"{basis} (mean partial rank corr {mean:+.3f}, NW t "
-        f"{fmt_tstat(tstat)} over {len(series)} dates; honest books measure ~0)",
+        f"{fmt_tstat(tstat)} over {dates}; honest books measure ~0)",
         details=details)
 
 
@@ -1226,6 +1417,17 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
 #: and hl5 controls honest Sortino/semivol and fast-EWMA books fail under
 #: GJR leverage.
 #:
+#: The EWMA grid reaches hl120 for long-memory risk models. On GARCH
+#: panels whose names differ in long-run vol, honest inverse-vol books on
+#: EWMA hl90/hl120 measured -0.02..-0.10 against an hl60-capped grid (WARN
+#: or FAIL on 5 and 7 of 10 seeds): the persistent per-name vol level is
+#: estimated better by the long filter than by any control. With hl120 in
+#: place of hl60 (still bracketed by hl40, hl120 and the 60d window) they
+#: measure |mean| <= 0.02, hl25-hl60 books stay >= -0.033, and planted
+#: forward, centered and blended inverse sizers keep -0.33..-1.0
+#: (proportional ones +0.35..+0.40). Books slower than the grid
+#: (hl180-hl250) can still reach the WARN band.
+#:
 #: The grid cannot span per-name information absent from close-to-close
 #: returns, including implied volatility, OHLC ranges and intraday realized
 #: volatility. Lawful sizing on such inputs may load on the residual, so the
@@ -1236,7 +1438,7 @@ def _same_bar_bleed(artifacts: BacktestArtifacts,
 #: construction. Uniform index-volatility scaling cancels in
 #: cross-sectional ranks.
 FWD_VOL_CONTROL_WINDOWS = (15, 20, 30, 40, 60)
-FWD_VOL_EWMA_HALFLIVES = (5, 10, 20, 40, 60)
+FWD_VOL_EWMA_HALFLIVES = (5, 10, 20, 40, 120)
 FWD_VOL_SEMIVOL_WINDOWS = (20, 60)
 FWD_VOL_ABSRET_HALFLIFE = 15
 FWD_VOL_MEAN_HALFLIFE = 20
@@ -1247,7 +1449,8 @@ FWD_VOL_MEAN_HALFLIFE = 20
 #: or centered-window blends can overlap that lawful dependence and remain
 #: WARN or unflagged; these constants do not establish universal error rates.
 #: Negative side: honest returns-derived trailing books bottom at about
-#: -0.07 while planted centered/forward inverse sizers measure -0.10..-0.39,
+#: -0.07 (EWMA books slower than the grid's hl120 at about -0.06) while
+#: planted centered/forward inverse sizers measure -0.10..-0.39,
 #: so FAIL at -0.075 sits just past the honest tail and WARN at -0.05 marks
 #: the gray band. Positive side: honest proportional-to-trailing-vol books
 #: carry up to ~+0.10 of estimation bias, so WARN sits at that ceiling and

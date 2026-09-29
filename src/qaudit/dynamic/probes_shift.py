@@ -21,8 +21,10 @@ These re-run the user's actual pipeline callables under time perturbation:
   never flat, but re-sampled from the signal only on a strict
   weekly/monthly cadence) aliases the same way - the +-1-bar shift rotates
   which staleness of the signal each refresh samples, a genuinely
-  different bet for any fast component - and is detected from position
-  changes (dominant refresh gap) rather than levels; same hedged WARN.
+  different bet for any fast component - and is detected from rebalance
+  bars (dominant refresh gap) rather than levels, with a hold recognized
+  under either recording (repeated target or price-drifted actually-held
+  weights); same hedged WARN.
 - ``dynamic.signal_reproducibility``   confirms ``signal_func(signal_input)``
   reproduces the audited signals, so the truncation verdict transfers.
 - ``dynamic.rolling_window_integrity`` the truncation probe: recomputes the
@@ -57,7 +59,7 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 
-from .._stats import annualized_sharpe
+from .._stats import annualized_sharpe, rebalance_rows
 from ..config import AuditConfig
 from ..inputs import BacktestArtifacts
 from ..types import (CheckResult, Severity, Status, errored, failed, passed,
@@ -170,7 +172,12 @@ SCHED_REFRESH_DOMINANT_SHARE = 0.9  # held-refresh detection: a held book
                               # scheduled book, so an honest weekly-refreshed
                               # multi-sleeve book would collapse into the
                               # peek rule's FAIL CRITICAL. Detect from
-                              # position changes instead: the dominant
+                              # rebalance bars instead (_stats.rebalance_rows:
+                              # a hold is recognized under either recording,
+                              # a repeated target or the price-drifted
+                              # actually-held weights, which move on every
+                              # bar and would hide the cadence from a raw
+                              # diff): the dominant
                               # refresh gap must be >= SCHED_MIN_GAP and
                               # cover at least this share of all gaps - the
                               # slack (vs the strict min-gap test) absorbs
@@ -246,7 +253,9 @@ def _strict_gap_schedule(active: pd.Series,
                 activity_source=source)
 
 
-def _refresh_grid_schedule(positions: pd.DataFrame) -> dict[str, Any] | None:
+def _refresh_grid_schedule(positions: pd.DataFrame,
+                           asset_returns: pd.DataFrame
+                           ) -> dict[str, Any] | None:
     """Held-refresh detector: a held book (never flat, so the
     level-based detector above cannot see it) whose positions change only
     on a strictly-cadenced refresh grid. The +-1-bar shift then rotates
@@ -256,14 +265,15 @@ def _refresh_grid_schedule(positions: pd.DataFrame) -> dict[str, Any] | None:
     (not the strict min-gap): sparse off-schedule delisting force-closes
     split a clean weekly cadence into occasional 1-4-bar gaps, and on a
     renormalizing engine those bars also move surviving names' weights, so
-    no exits-to-zero exclusion can restore the strict test. Returns the
-    detection details, or None."""
-    pos = positions.fillna(0.0)
-    chg = pos.diff().abs().gt(SCHED_POS_TOL)
-    if len(chg):
-        chg.iloc[0] = pos.iloc[0].abs().gt(SCHED_POS_TOL)   # entry trade
-    refresh = chg.any(axis=1)
-    flags = np.flatnonzero(refresh.to_numpy())
+    no exits-to-zero exclusion can restore the strict test. Refresh bars
+    are :func:`qaudit._stats.rebalance_rows` (row 0 = the entry): a bar
+    that neither repeats the previous target nor matches the price-drifted
+    hold. A raw position diff would see an engine that records
+    actually-held (drifted) weights trading on every bar and miss its
+    cadence; a drift-only test would do the same to a repeated-target
+    recording. Returns the detection details, or None."""
+    refresh = rebalance_rows(positions, asset_returns)
+    flags = np.flatnonzero(refresh)
     n_bars = int(len(refresh))
     n_refresh = int(len(flags))
     if n_bars == 0 or n_refresh < SCHED_MIN_ACTIVE_BARS:
@@ -282,7 +292,7 @@ def _refresh_grid_schedule(positions: pd.DataFrame) -> dict[str, Any] | None:
     return dict(schedule_kind="held_refresh", active_frac=round(frac, 3),
                 n_active_bars=n_refresh, n_bars=n_bars, dominant_gap=dom,
                 dominant_gap_share=round(share, 3),
-                activity_source="position changes")
+                activity_source="position rebalances (drift-aware)")
 
 
 def _scheduled_activity(artifacts: BacktestArtifacts,
@@ -296,8 +306,9 @@ def _scheduled_activity(artifacts: BacktestArtifacts,
       conservative: on a costed book the exit-cost bar is nonzero one bar
       after each bet, breaking the min-gap test, so a costed scheduled
       book without positions keeps the un-carved rules (fails safe).
-    - ``held_refresh`` (positions only): a held book whose
-      positions change on a strict dominant cadence - the shape the
+    - ``held_refresh`` (positions and asset_returns): a held book whose
+      positions are rebalanced on a strict dominant cadence (holds
+      recognized under target or drifted recording) - the shape the
       level-based test can never reach because a held book is ~100%
       level-active.
 
@@ -308,7 +319,8 @@ def _scheduled_activity(artifacts: BacktestArtifacts,
         det = _strict_gap_schedule(active, "positions")
         if det is not None:
             return det
-        return _refresh_grid_schedule(artifacts.positions)
+        return _refresh_grid_schedule(artifacts.positions,
+                                      artifacts.asset_returns)
     if base_rets is not None:
         vals = pd.Series(base_rets).astype(float)
         active = vals.notna() & (vals.abs() > 0.0)
@@ -455,6 +467,30 @@ def _date_shift(artifacts: BacktestArtifacts, config: AuditConfig,
         if ambiguous:
             details["peek_ambig_side"] = ("positive_remnant" if ambiguous_pos
                                           else "negative_remnant")
+        # The evaporation messages name the gate that decided: the remnant
+        # is collapsed when it sits inside max(noise band, the
+        # commensurability ratio x sr_0), and at a modest baseline
+        # (sr_0 < noise_floor / PEEK_AMBIG_MIN_RATIO) the noise band binds,
+        # so a remnant commensurate by ratio still reads as collapsed - the
+        # message must not claim it fell below the ratio.
+        noise_gated = sr_m1 >= PEEK_AMBIG_MIN_RATIO * sr_0
+        if noise_gated:
+            remnant_str = (f"remnant {sr_m1 / sr_0:.0%} of baseline but "
+                           f"inside the ~0 noise band (+-{noise_floor:.2f})")
+            honest_fast_str = ("honest fast alpha whose commensurate k=-1 "
+                               "remnant cannot clear the noise band at this "
+                               "baseline and sample size")
+            same_shape_str = ("At this baseline and sample size an honest "
+                              "fast alpha's commensurate remnant cannot "
+                              "clear the noise band either")
+        else:
+            remnant_str = (f"remnant below {PEEK_AMBIG_MIN_RATIO:.0%} of "
+                           f"baseline")
+            honest_fast_str = ("honest ultra-fast alpha whose "
+                               "autocorrelation is too low to leave a "
+                               "commensurate k=-1 remnant")
+            same_shape_str = ("A near-zero-autocorrelation ultra-fast alpha "
+                              "leaves the same sub-commensurate remnant")
         if anti_corr and causal_verified:
             # Benign reversal artifact: rule (a) is uninformative for this
             # signal shape, but rule (b)'s delay-fragility question still
@@ -623,8 +659,8 @@ def _date_shift(artifacts: BacktestArtifacts, config: AuditConfig,
             return warned(
                 CHECK_DATE_SHIFT,
                 f"peeking one bar EARLIER turns the strategy against its own "
-                f"bar (annualized SR {sr_0:.1f} -> {sr_m1:.1f} at shift k=-1 "
-                f"- below the ~0 noise band (+-{noise_floor:.2f}) but short "
+                f"bar (annualized SR {sr_0:.1f} -> {sr_m1:.1f} at shift k=-1, "
+                f"below the ~0 noise band (+-{noise_floor:.2f}) but short "
                 f"of the full anti-correlation bar ({anti_bar:.1f}); curve: "
                 f"{curve_str}) - an ambiguous shape this probe cannot "
                 f"classify alone: a causal signal with a small same-bar "
@@ -676,16 +712,14 @@ def _date_shift(artifacts: BacktestArtifacts, config: AuditConfig,
             return warned(
                 CHECK_DATE_SHIFT,
                 f"peeking one bar EARLIER erases the edge (annualized SR "
-                f"{sr_0:.1f} -> {sr_m1:.1f} at shift k=-1, remnant below "
-                f"{PEEK_AMBIG_MIN_RATIO:.0%} of baseline; curve: "
-                f"{curve_str}) even though signal_func was verified causal "
-                f"with respect to its input at the sampled dates - the edge "
-                f"is welded to exactly the executed bar. Two readings "
+                f"{sr_0:.1f} -> {sr_m1:.1f} at shift k=-1, {remnant_str}; "
+                f"curve: {curve_str}) even though signal_func was verified "
+                f"causal with respect to its input at the sampled dates - "
+                f"the edge is welded to exactly the executed bar. Two readings "
                 f"survive the stamp and this probe cannot separate them: a "
                 f"leak outside the signal computation (signal_input "
                 f"construction, calendar joins, engine timing), or an "
-                f"honest ultra-fast alpha whose autocorrelation is too low "
-                f"to leave a commensurate k=-1 remnant.",
+                f"{honest_fast_str}.",
                 severity=Severity.HIGH,
                 remediation="Audit what the truncation probe cannot see: the "
                             "timestamps and construction of signal_input "
@@ -702,12 +736,11 @@ def _date_shift(artifacts: BacktestArtifacts, config: AuditConfig,
             return failed(
                 CHECK_DATE_SHIFT,
                 f"peeking one bar EARLIER destroys the strategy (annualized SR "
-                f"{sr_0:.1f} -> {sr_m1:.1f} at shift k=-1, remnant below "
-                f"{PEEK_AMBIG_MIN_RATIO:.0%} of baseline; curve: {curve_str}) "
+                f"{sr_0:.1f} -> {sr_m1:.1f} at shift k=-1, {remnant_str}; "
+                f"curve: {curve_str}) "
                 f"- the edge is welded to exactly the executed bar: the "
-                f"signature of a signal that embeds that bar's return. (A "
-                f"near-zero-autocorrelation ultra-fast alpha leaves the same "
-                f"sub-commensurate remnant; only the causality probes can "
+                f"signature of a signal that embeds that bar's return. "
+                f"({same_shape_str}; only the causality probes can "
                 f"adjudicate, and they did not run.)",
                 severity=Severity.CRITICAL,
                 remediation="Pass signal_func and artifacts.signal_input so "

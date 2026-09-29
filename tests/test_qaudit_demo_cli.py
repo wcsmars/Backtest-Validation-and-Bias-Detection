@@ -136,7 +136,7 @@ def test_repeated_case_names_run_once_in_first_listed_order(fake_runs, capsys, t
     out, err = capsys.readouterr()
     assert fake_runs == ["overfit", "clean"]
     assert "ignoring repeated case(s): overfit, clean" in err
-    payload = json.loads((output / "reports.json").read_text())
+    payload = json.loads((output / "reports.json").read_text(encoding="utf-8"))
     assert [c["name"] for c in payload["cases"]] == ["overfit", "clean"]
     assert out.count("overfit ") == 1
 
@@ -157,13 +157,13 @@ def test_unknown_name_still_wins_over_dedup(fake_runs, capsys):
 
 def test_output_dir_that_is_a_regular_file_is_named_as_such(fake_runs, capsys, tmp_path):
     blocker = tmp_path / "reports.json"
-    blocker.write_text("x")
+    blocker.write_text("x", encoding="utf-8")
     assert demo.main(["clean", "--summary-only", "--output-dir", str(blocker)]) == 2
     err = capsys.readouterr().err
     assert "output path exists and is not a directory" in err
     assert "already exists" not in err
     assert fake_runs == []
-    assert blocker.read_text() == "x"
+    assert blocker.read_text(encoding="utf-8") == "x"
 
 
 def test_existing_directory_keeps_the_preserve_message(fake_runs, capsys, tmp_path):
@@ -185,7 +185,7 @@ def test_dangling_symlink_output_dir_is_rejected_before_any_case_runs(fake_runs,
 
 def test_non_directory_parent_is_rejected_before_any_case_runs(fake_runs, capsys, tmp_path):
     blocker = tmp_path / "file"
-    blocker.write_text("not a directory")
+    blocker.write_text("not a directory", encoding="utf-8")
     assert demo.main(["clean", "--summary-only", "--output-dir",
                       str(blocker / "deeper" / "report")]) == 2
     assert "is not a directory" in capsys.readouterr().err
@@ -227,3 +227,43 @@ def test_symlinked_parent_writes_inside_the_link_target(fake_runs, tmp_path):
 
 def test_output_dir_problem_is_none_for_a_usable_path(tmp_path):
     assert demo.output_dir_problem(tmp_path / "new") is None
+
+
+def test_entry_point_survives_a_console_that_cannot_encode_report_text():
+    # print(report) on an ASCII console (errors="strict") must not die
+    # mid-report on a typographic character: the entry point backslash-escapes it.
+    code = ("import sys\n"
+            "import pandas as pd\n"
+            "from qaudit import AuditReport, BacktestArtifacts, demo\n"
+            "from qaudit.synthetic import SyntheticBacktest\n"
+            "from qaudit.types import passed\n"
+            "frame = pd.DataFrame({'A': [1.0, 2.0]},\n"
+            "                     index=pd.date_range('2024-01-01', periods=2))\n"
+            "case = SyntheticBacktest('clean', 'Synthetic test case',\n"
+            "                         BacktestArtifacts(frame, frame),\n"
+            "                         expected_flags=())\n"
+            "demo.run_case = lambda name: (case, AuditReport(\n"
+            "    [passed('lookahead.test', 'ok \\u2026 fine')]))\n"
+            "sys.argv = ['qaudit-demo', 'clean']\n"
+            "sys.exit(demo.cli())\n")
+    env = dict(os.environ, PYTHONPATH=str(REPO / "src"), PYTHONIOENCODING="ascii")
+    result = subprocess.run([sys.executable, "-c", code], cwd=str(REPO), env=env,
+                            capture_output=True, text=True, check=False)
+    assert "Traceback" not in result.stderr, result.stderr
+    assert result.returncode == 0, result.stderr
+    assert "ok \\u2026 fine" in result.stdout
+
+
+def test_real_demo_case_runs_on_an_ascii_console():
+    # End to end on one genuine case: its description and full per-check
+    # report print completely, whatever characters the messages carry.
+    env = dict(os.environ, PYTHONPATH=str(REPO / "src"), PYTHONIOENCODING="ascii")
+    result = subprocess.run([sys.executable, "-m", "qaudit.demo", "overfit"],
+                            cwd=str(REPO), env=env, capture_output=True,
+                            text=True, check=False)
+    assert "Traceback" not in result.stderr, result.stderr
+    assert result.returncode == 0, result.stderr
+    # the run reaches its final catch-matrix row
+    assert "expected flag 'performance.deflated_sharpe': CAUGHT" in result.stdout
+    assert result.stdout.rstrip().splitlines()[-1].split() == [
+        "overfit", "1/1", "FLAGGED"]

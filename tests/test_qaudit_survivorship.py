@@ -180,6 +180,8 @@ def test_positions_on_missing_returns_warns_on_nan_holes():
     assert frac == pytest.approx(50 / (300 * 12))
     assert frac > MISSING_RETURN_FRAC
     assert re.search(r"\b50\b", res.message)
+    # punctuation after the number: "0 - a delisting" would read as subtraction
+    assert "PnL silently becomes 0: a delisting loss" in res.message
     assert res.details["first_asset"] == "A01"
     assert res.details["first_date"] == str(dates[200].date())
     assert res.remediation

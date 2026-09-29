@@ -10,7 +10,8 @@ Override relevant fields for the intended research setting:
 from __future__ import annotations
 
 import datetime as _dt
-from dataclasses import dataclass, field
+import difflib
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 import numpy as np
@@ -46,6 +47,18 @@ _MAX_ROLLING_WINDOW = 1_000_000
 # cost-sweep arithmetic/formatting, not to prescribe a realistic execution
 # model.
 _MAX_COST_BPS = 1_000_000.0
+
+
+_FIELD_NAMES: dict[type, frozenset[str]] = {}
+
+
+def _field_names(cls: type) -> frozenset[str]:
+    """Dataclass field names of ``cls``, computed once per class for the
+    unknown-field guard in ``AuditConfig.__setattr__``."""
+    names = _FIELD_NAMES.get(cls)
+    if names is None:
+        names = _FIELD_NAMES[cls] = frozenset(f.name for f in fields(cls))
+    return names
 
 
 @dataclass
@@ -190,7 +203,9 @@ class AuditConfig:
         ``sharpe_warn=-5`` or ``n_placebo=-1`` would not crash any check, it
         would silently mis-audit - so nonsensical values raise here. The
         same validation re-runs on every later field assignment, so a config
-        cannot be mutated into an invalid state after construction either."""
+        cannot be mutated into an invalid state after construction either,
+        and assigning a name that is not a field raises ``TypeError`` (as
+        the constructor does for an unknown keyword)."""
         self._validate()
         object.__setattr__(self, "_validation_active", True)
 
@@ -203,6 +218,25 @@ class AuditConfig:
         if not getattr(self, "_validation_active", False):
             object.__setattr__(self, name, value)
             return
+        # A misspelled field (cfg.sharpe_fial = 3.0) would otherwise land
+        # as a stray instance attribute that no check reads and provenance
+        # never records, while the real field keeps its default. Reject
+        # it with the constructor's exception type. copy, deepcopy and
+        # pickle restore __dict__ directly and dataclasses.replace goes
+        # through __init__, so none of them reach this branch. The guard
+        # flag itself is not a field either, so validation cannot be
+        # switched off after construction.
+        known = _field_names(type(self))
+        if name not in known:
+            cls_name = type(self).__name__
+            close = difflib.get_close_matches(name, sorted(known), n=3)
+            hint = (f" (did you mean {' or '.join(map(repr, close))}?)"
+                    if close else "")
+            raise TypeError(
+                f"{cls_name} has no field {name!r}{hint} - "
+                f"assigning it would add a stray attribute that no "
+                f"check reads. Custom values belong in "
+                f"{cls_name}.extra.")
         old = getattr(self, name, None)
         had = hasattr(self, name)
         object.__setattr__(self, name, value)

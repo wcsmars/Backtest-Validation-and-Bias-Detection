@@ -84,6 +84,8 @@ def test_full_weight_missing_bar_cannot_hide_in_cell_count(terminal):
         MISSING_RETURN_MAX_BAR_GROSS
     assert r.details["frac_missing_return"] < MISSING_RETURN_FRAC  # diluted
     assert "gross book exposure" in r.message
+    # punctuation after the number: "0 - on a" would read as subtraction
+    assert "silently became 0; on a concentrated holding" in r.message
     assert r.remediation
 
 

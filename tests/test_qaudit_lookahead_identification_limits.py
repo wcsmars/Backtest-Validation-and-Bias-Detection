@@ -253,6 +253,37 @@ class TestBleedExtremeDateEscalation:
         assert r.status is Status.PASS
         assert r.details["extreme_frac"] > lookahead.BLEED_EXTREME_FRAC
 
+    def test_extreme_mass_below_t_gate_not_exonerated(self):
+        # A 5% intermittent same-bar leak on a lawful anti-tilt book (mean
+        # about -0.08 without it): the lawful negative dates cancel the
+        # leak's one-signed extreme dates in the pooled NW t, which misses
+        # the co-gate. The extreme-date mass must keep the PASS unresolved
+        # instead of the affirmative "no same-bar information" wording.
+        mkt = simulate_market(seed=0, n_assets=40, n_periods=750,
+                              death_frac=0.0)
+        rets = mkt["returns"]
+        mom = momentum_signal(rets)
+        mom5 = momentum_signal(rets, window=5)
+        base = _norm(0.80 * _rankw(mom.shift(1))
+                     - 0.20 * _rankw(mom5.shift(1)))
+        rng = np.random.default_rng(1)
+        rows = np.zeros(len(rets), bool)
+        rows[rng.choice(len(rets), int(0.05 * len(rets)), replace=False)] = True
+        leak = pd.DataFrame(0.0, index=rets.index, columns=rets.columns)
+        leak.iloc[rows] = _rankw(mom).iloc[rows] * 3.0
+        r = lookahead._same_bar_bleed(
+            _arts(rets, mom, _norm(base + leak)), CFG)
+        d = r.details
+        assert r.status is Status.PASS
+        assert abs(d["mean_partial_corr"]) < CFG.bleed_partial_fail
+        assert abs(d["nw_tstat"]) <= CFG.bleed_tstat
+        assert d["n_extreme_dates"] >= lookahead.BLEED_EXTREME_MIN_DATES
+        assert d["extreme_frac"] >= lookahead.BLEED_EXTREME_FRAC
+        assert d["extreme_sign_share"] > 0.9
+        assert d["unresolved"] is True
+        assert "not exonerated" in r.message
+        assert "carry no same-bar signal information" not in r.message
+
     def test_escalation_constants_pinned(self):
         assert lookahead.BLEED_EXTREME_DATE_Z == 4.0
         assert lookahead.BLEED_EXTREME_FRAC == 0.02
@@ -302,6 +333,9 @@ class TestReturnLoadingTstatEscalation:
         assert s.status is Status.PASS
         assert abs(s.details["nw_tstat"]) < lookahead.RETURN_LOADING_TSTAT_ESC
         assert b.status is Status.PASS
+
+    def test_escalation_constant_pinned(self):
+        assert lookahead.RETURN_LOADING_TSTAT_ESC == 6.0
 
 
 # ---------------------------------------------------------------------------

@@ -319,6 +319,112 @@ def test_sparse_quarterly_dividends_stay_pass():
     assert r.details["frac_discrepant"] < 0.05
 
 
+@pytest.mark.parametrize("n_shifted", [1, 3])
+def test_few_asset_date_shift_warns_below_pervasive_bar(n_shifted):
+    # A one-bar shift on 1 or 3 of 20 assets puts only 5-15% of cells at
+    # daily-vol scale: the pooled median stays 0.00bp and the pooled
+    # fraction stays under the 25% pervasive bar, but each shifted name is
+    # off at its own median. The per-asset prong must WARN and name them.
+    px, declared = _mixed_vendor_panel(seed=5, n_shifted=n_shifted)
+    r = _price_check(px, declared)
+    assert r.status is Status.WARN, r.message
+    assert r.severity is Severity.MEDIUM
+    assert r.details["median_abs_diff"] <= 1e-4
+    assert r.details["frac_discrepant"] < 0.25
+    shifted = [f"V{i:02d}" for i in range(n_shifted)]
+    assert r.details["mismatched_assets"] == shifted
+    assert r.details["n_assets_discrepant_median"] == n_shifted
+    for name in shifted:
+        assert name in r.message
+    assert "match asset_returns" not in r.message
+
+
+def test_minority_wrong_ticker_mapping_warns():
+    # prices of 4 of 20 names rotated among themselves (a wrong ticker
+    # join): 20% of cells off, pooled median clean, per-asset prong fires
+    px, declared = _mixed_vendor_panel(seed=6, n_shifted=0)
+    swapped = ["V00", "V01", "V02", "V03"]
+    px = px.rename(columns=dict(zip(swapped, swapped[1:] + swapped[:1])))
+    px = px[declared.columns]
+    r = _price_check(px, declared)
+    assert r.status is Status.WARN, r.message
+    assert sorted(r.details["mismatched_assets"]) == swapped
+
+
+def test_cent_rounded_single_asset_shift_warns():
+    # per-asset tolerance is the per-cell rounding bound on a quantized
+    # panel: honest $2-8 names stay silent, one shifted name still fires.
+    # The shifted half is caught by the pooled median prong as well (the
+    # shift breaks the rounding-shaped waiver); this test mainly pins the
+    # rounding-aware per-asset tolerance against false positives.
+    px, rets = _gbm_panel(seed=1000)
+    honest = _price_check(px, rets)
+    assert honest.status is Status.PASS, honest.message
+    assert honest.details["n_assets_mismatched"] == 0
+    declared = rets.copy()
+    declared["S03"] = rets["S03"].shift(1)
+    r = _price_check(px, declared)
+    assert r.status is Status.WARN, r.message
+    assert r.details["mismatched_assets"] == ["S03"]
+
+
+def test_minority_heavy_payers_coarse_bars_stay_pass():
+    # honest guard for the per-asset prong: on monthly bars 2 of 12 names
+    # pay 6%/yr, so their own median carries a one-sided sub-cap offset in
+    # every cell (17% of cells, below the pervasive bar). Their discrepant
+    # cells carry the dividend signature and must be waived per asset.
+    rng = np.random.default_rng(9)
+    dates = pd.date_range("2015-01-31", periods=60, freq=pd.offsets.MonthEnd())
+    cols = [f"F{i:02d}" for i in range(12)]
+    price_ret = pd.DataFrame(rng.normal(0.004, 0.04, (60, 12)),
+                             index=dates, columns=cols)
+    px = pd.DataFrame(100.0 * (1.0 + price_ret).cumprod(),
+                      index=dates, columns=cols)
+    total = price_ret.copy()
+    total[["F00", "F01"]] += 0.06 / 12.0
+    r = _price_check(px, total, ppy=12)
+    assert r.status is Status.PASS, r.message
+    assert r.details["n_assets_discrepant_median"] == 2
+    assert r.details["n_assets_mismatched"] == 0
+
+
+def test_heavy_payer_panel_with_one_shifted_name_warns():
+    # every name pays 6%/yr on monthly bars, so the pooled median and the
+    # pooled fraction are both waived as dividend-shaped; one name also
+    # carries a one-bar shift. The per-asset prong must still name it, and
+    # its lead-in must say the pooled prongs waived the panel rather than
+    # claim the pooled comparison passed.
+    rng = np.random.default_rng(9)
+    dates = pd.date_range("2015-01-31", periods=60, freq=pd.offsets.MonthEnd())
+    cols = [f"M{i:02d}" for i in range(12)]
+    price_ret = pd.DataFrame(rng.normal(0.004, 0.04, (60, 12)),
+                             index=dates, columns=cols)
+    px = pd.DataFrame(100.0 * (1.0 + price_ret).cumprod(),
+                      index=dates, columns=cols)
+    total = price_ret + 0.06 / 12.0
+    total["M03"] = total["M03"].shift(1)
+    r = _price_check(px, total, ppy=12)
+    assert r.status is Status.WARN, r.message
+    assert r.severity is Severity.MEDIUM
+    assert r.details["mismatched_assets"] == ["M03"]
+    assert r.details["frac_discrepant"] >= 0.25
+    assert "waived as one-sided dividend income" in r.message
+    assert "passes" not in r.message
+
+
+def test_per_asset_warn_carries_scope_clause():
+    # prices cover only part of the returns grid (the last 60 bars of 10
+    # names are missing) and one covered name is shifted: the per-asset
+    # WARN must carry the same scope clause the PASS variants do
+    px, declared = _mixed_vendor_panel(seed=5, n_shifted=1)
+    px.iloc[-60:, 10:] = np.nan
+    r = _price_check(px, declared)
+    assert r.status is Status.WARN, r.message
+    assert r.details["mismatched_assets"] == ["V00"]
+    assert r.details["frac_return_cells_covered"] < 1.0
+    assert "Scope: prices cover" in r.message
+
+
 # ===========================================================================
 # 5. ic_stability / ic_regime_concentration: SE-scaled moot gate
 # ===========================================================================

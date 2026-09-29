@@ -259,12 +259,12 @@ def test_demo_runs_as_plain_script_without_shadowing_stdlib_types():
     # end-to-end proof that startup survives in this interpreter
     proc = subprocess.run(
         [sys.executable, str(REPO / "src" / "qaudit" / "demo.py"), "--help"],
-        cwd=str(REPO), capture_output=True, text=True, timeout=120)
+        cwd=str(REPO), capture_output=True, text=True, encoding="utf-8", timeout=120)
     assert proc.returncode == 0, proc.stderr
     assert "same_bar_execution" in proc.stdout
     proc = subprocess.run(
         [sys.executable, str(REPO / "src" / "qaudit" / "demo.py"), "bogus"],
-        cwd=str(REPO), capture_output=True, text=True, timeout=120)
+        cwd=str(REPO), capture_output=True, text=True, encoding="utf-8", timeout=120)
     assert proc.returncode == 2
     assert "available:" in proc.stderr
 
@@ -276,5 +276,5 @@ def test_demo_runs_as_plain_script_without_shadowing_stdlib_types():
 def test_no_class_scoped_fixture_defined_as_instance_method():
     pat = re.compile(r"^[ \t]+@pytest\.fixture\([^)]*scope=", re.M)
     offenders = [p.name for p in sorted(REPO.glob("tests/test_qaudit_*.py"))
-                 if pat.search(p.read_text())]
+                 if pat.search(p.read_text(encoding="utf-8"))]
     assert not offenders, offenders

@@ -336,6 +336,8 @@ class TestSameBarReturnLoading:
         assert lookahead.RETURN_LOADING_FAIL == 0.15
 
     def test_registered_and_emitted(self, market0):
+        # Pins the shipped state: the check is registered, so the default
+        # run() emits it without any monkeypatching.
         rets = market0["returns"]
         sig = _gap_momentum(rets)
         art = _arts(rets, sig, positions_from_signals(sig, 1))

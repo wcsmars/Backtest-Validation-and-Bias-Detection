@@ -27,6 +27,7 @@ from pathlib import Path  # noqa: E402
 
 from qaudit import AuditConfig, __version__, audit, synthetic  # noqa: E402
 from qaudit._html import render_html, report_view  # noqa: E402
+from qaudit.cli import _tolerant_stdio  # noqa: E402
 from qaudit.report import AuditReport  # noqa: E402
 from qaudit.types import Status  # noqa: E402
 
@@ -275,6 +276,7 @@ def cli() -> int:
     catches it, so ``main()`` keeps raising for tests and for pytest's own
     abort.
     """
+    _tolerant_stdio()
     try:
         return main(sys.argv[1:])
     except KeyboardInterrupt:

@@ -13,6 +13,8 @@ Timing convention (one bar = one period, e.g. one trading day)
 - ``strategy_returns.loc[t]`` = net portfolio return over period t.
 - ``universe.loc[t, a]``    = True iff asset ``a`` was actually tradeable /
   in the investable universe at t (as known *at t*, not as known today).
+  It must be stamped through the last backtest date: a membership feed
+  that stops early is rejected, not read as simultaneous delistings.
 
 If your pipeline uses a different convention, remap before auditing -
 every detector in this library assumes the above.
@@ -77,6 +79,25 @@ _SPARSE_STAMP_SPACING = 1.5
 # NaNs retain their pre-listing/post-delisting interpretation; smaller
 # interior gaps remain subject to the downstream survivorship checks.
 _UNIVERSE_MAX_INTERIOR_NAN_FRAC = 0.01
+# Trailing membership coverage, in daily bars, rescaled to the declared
+# periods_per_year exactly like the no_exits flicker window (no floor, so
+# monthly and coarser bars get a zero-bar tolerance). The coverage floor
+# above counts dates, so a universe that ends early (a constituents feed
+# lagging the returns feed, or a last month not yet populated: a truncated
+# index or a trailing block of all-NaN rows) clears it, and aligned() then
+# fills the tail with False. Every live member makes a simultaneous
+# terminal exit while it keeps trading, and survivorship.no_exits reads
+# that as a healthy exit rate (a survivor-only list laundered into a
+# PASS). Reject a tail longer than this window on which the last stamped
+# members still carry finite returns. Kept equal to
+# survivorship.NO_EXITS_FLICKER_MAX_OUT_DAILY_BARS: no_exits reports a
+# tail within its window as too close to the sample end to verify, and
+# where the window rounds to zero it counts every terminal exit, so there
+# even a one-bar tail is rejected. Per-column trailing NaN (a genuine
+# delisting) and explicit all-False rows are declarations, not missing
+# data, and stay legal.
+_UNIVERSE_MAX_TRAILING_GAP_DAILY_BARS = 10
+_DAILY_BARS_PER_YEAR = 252.0
 # declared periods_per_year vs the bar frequency observed on the signals x
 # asset_returns grid (bar count / calendar span): reject when they disagree
 # by more than this factor either way. periods_per_year feeds every
@@ -788,13 +809,56 @@ class BacktestArtifacts:
                     f"(mass false trading_outside_universe violations, "
                     f"fake exits in no_exits); {hint}"
                 )
+            # Trailing coverage gate (see the _UNIVERSE_MAX_TRAILING_GAP_
+            # DAILY_BARS comment): find the last grid date carrying any
+            # finite membership. Rows missing from the universe index and
+            # rows that are NaN in every column both count as unstamped.
+            stamped = ~membership.isna().all(axis=1).to_numpy()
+            last_stamp = overlap[stamped].max()
+            tail = common_idx[common_idx > last_stamp]
+            gap_window = int(np.floor(
+                _UNIVERSE_MAX_TRAILING_GAP_DAILY_BARS
+                * float(self.periods_per_year) / _DAILY_BARS_PER_YEAR))
+            if len(tail) > gap_window:
+                last_row = _frame_to_float(membership.loc[[last_stamp]])[0]
+                members = present[last_row == 1.0]
+                live_tail = int(np.isfinite(_frame_to_float(
+                    self.asset_returns.loc[tail, members])).any(axis=1).sum())
+                if live_tail > gap_window:
+                    raise MisalignedInputError(
+                        f"artifacts.universe stops {len(tail)} grid bar(s) "
+                        f"before the end of the signals x asset_returns "
+                        f"grid: its last membership stamp is {last_stamp}, "
+                        f"the grid runs to {common_idx[-1]}, and "
+                        f"{live_tail} of those trailing bars still carry "
+                        f"finite asset_returns for the {len(members)} "
+                        f"name(s) that were members on that stamp "
+                        f"(tolerance {gap_window} bar(s)) - aligned() "
+                        f"would fillna(False) the tail, turning every live "
+                        f"member into a simultaneous terminal exit (fake "
+                        f"attrition that launders survivorship.no_exits, "
+                        f"and false trading_outside_universe violations). "
+                        f"This is a lagging or not-yet-populated "
+                        f"constituents feed, not delisting: forward-fill "
+                        f"membership to the backtest end if the names "
+                        f"stayed members (universe.dropna(how='all')"
+                        f".reindex(dates, method='ffill') with dates = the "
+                        f"signals x asset_returns calendar; per-column "
+                        f"delisting NaN is kept), or trim "
+                        f"signals/asset_returns to the universe's span. "
+                        f"Record genuine exits as explicit False cells or "
+                        f"per-column trailing NaN; padding the whole tail "
+                        f"with False instead is read by no_exits as a mass "
+                        f"exit, not attrition."
+                    )
             # Interior NaN mass gate (see the _UNIVERSE_MAX_INTERIOR_NAN_
             # FRAC calibration comment): scattered NaN cells strictly
             # inside a column's own finite span decode to False and
             # fabricate membership exits/out-bars at scale. Leading
             # (pre-listing) and trailing (post-delisting) runs decode to
-            # False correctly and stay exempt; sub-floor interior NaN
-            # stays legal by the aligned() contract.
+            # False correctly and stay exempt per column (a tail with no
+            # membership in any column is rejected above); sub-floor
+            # interior NaN stays legal by the aligned() contract.
             gvals = _frame_to_float(self.universe.loc[
                 self.universe.index.isin(common_idx), common_cols
             ])
@@ -829,8 +893,9 @@ class BacktestArtifacts:
                         f"(universe.ffill() carries the last known flag "
                         f"through data holes), or set False deliberately "
                         f"(universe.fillna(False)) if the names were "
-                        f"genuinely out. Pre-listing and post-delisting "
-                        f"NaN runs are exempt and may stay."
+                        f"genuinely out. Per-column pre-listing and "
+                        f"post-delisting NaN runs are exempt and may "
+                        f"stay."
                     )
         # positions column-mass gate (see the _POSITIONS_MIN_MASS_KEPT
         # calibration comment): a wholesale ticker-label mismatch would let

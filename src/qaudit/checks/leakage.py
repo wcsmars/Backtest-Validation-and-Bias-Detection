@@ -32,12 +32,14 @@ leakage.ic_outlier_dates     count of dates with |IC| >= a moderate bar
 from __future__ import annotations
 
 import hashlib
+import math
 from collections import Counter
 from functools import lru_cache
 
 import numpy as np
 import pandas as pd
-from scipy.stats import poisson, rankdata
+from scipy.stats import beta as beta_dist
+from scipy.stats import norm, poisson, rankdata
 from scipy.stats import t as t_dist
 
 from .._stats import MIN_NAMES as _MIN_NAMES
@@ -66,10 +68,25 @@ _NULL_MEDIAN_FAIL_MULT = 3.0
 # approximation for n <= 10 (0.327 vs 0.290 at n=8), an under-count that
 # grows linearly in n_dates while the count bound's slack grows as sqrt.
 # The t approximation used beyond n=10 is within ~4% of a Monte Carlo
-# null for n=11..30 where the tail is material (x <= 0.45) and ~10% low
-# only in the deep tail, where the contribution to the expected count is
-# negligible.
+# null for n=11..30 where the tail is material (x <= 0.45), which is all
+# the outlier bar reads. It is not a deep-tail law: past x ~ 0.6 it
+# undercounts the permutation tail by 10-60% (0.81x at n=11, x=0.70;
+# 0.42x at n=11, x=0.90), so the perfect-rank budget, which lives there,
+# reads _perfect_tail_ge instead.
 _OUTLIER_EXACT_MAX_N = 10
+
+# Exact tie-free tails for the perfect-rank budget through this breadth,
+# by a subset DP (_exact_spearman_tail_dp: ~n * 2^n work, ~0.06s cold and
+# ~20 MB peak at n=14, cached per breadth; each extra name roughly doubles
+# both). Past it, _spearman_tail_ge_conservative: at most ~0.3% below the
+# exact law at n=11..16 and within Monte Carlo error (~1%) of 3e7-8e7-draw
+# permutation nulls at n=17..200, and above the true tail deeper in.
+_PERFECT_EXACT_MAX_N = 14
+
+# Edgeworth-series coefficients for the tie-free Spearman tail (Best &
+# Roberts 1975, Applied Statistics algorithm AS 89).
+_AS89_COEF = (0.2274, 0.2531, 0.1745, 0.0758, 0.1033, 0.3932, 0.0879,
+              0.0151, 0.0072, 0.0831, 0.0131, 4.6e-4)
 
 # Poisson upper-tail probability. Under independent dates its variance
 # dominates the corresponding Poisson-binomial variance. Overlapping labels
@@ -310,13 +327,19 @@ def _perfect_rank_dates(ic: pd.Series, joint_names: pd.Series,
     # Poisson guard: even past the breadth gate, noise produces the odd
     # near-perfect date (rate depends on breadth). Fire only when the count
     # clears the null expectation by ~4 sigma as well as the fraction bar.
-    # The per-date rate is the null tail at the configured bar from the
-    # exact/t machinery (tie-aware - see _tied_two_sided_p): a fixed
-    # 0.90-bar table would convict pure noise the moment a user lowered
-    # leak_perfect_ic (a legitimate sensitivity probe), and clipping the
-    # rate to 0.0 past breadth 13 would zero the wide-book budget. Rates
-    # are a function of the panel's breadth/tie structure alone - never of
-    # the IC values - so the accused dates cannot shrink their own
+    # The per-date rate is the null tail at the configured bar (tie-aware -
+    # see _tied_two_sided_p): a fixed 0.90-bar table would convict pure
+    # noise the moment a user lowered leak_perfect_ic (a legitimate
+    # sensitivity probe), and clipping the rate to 0.0 past breadth 13
+    # would zero the wide-book budget. Tie-free dates read
+    # _perfect_tail_ge (exact through breadth _PERFECT_EXACT_MAX_N,
+    # conservative beyond), never the t-approximation: that law undercounts
+    # this deep tail by 20-60%, enough to convict 11-13-name noise at a
+    # lowered bar on a long daily panel. Tied dates past breadth
+    # _OUTLIER_EXACT_MAX_N read the seeded MC tail's ~2-sigma upper bound,
+    # so an unlucky draw cannot under-budget them either. Rates are a
+    # function of the panel's breadth/tie structure alone - never of the
+    # IC values - so the accused dates cannot shrink their own
     # expectation.
     bar = float(config.leak_perfect_ic)
     p = np.zeros(len(wide))
@@ -332,11 +355,12 @@ def _perfect_rank_dates(ic: pd.Series, joint_names: pd.Series,
     for (n, ku, kv), idxs in groups.items():
         ii = np.asarray(idxs, dtype=int)
         if ku is None and kv is None:
-            p[ii] = 2.0 * float(_spearman_tail_ge(int(n), bar))
+            p[ii] = 2.0 * _perfect_tail_ge(int(n), bar)
         else:
             p[ii] = _tied_two_sided_p(
                 ku if ku is not None else _distinct_key(int(n)),
-                kv if kv is not None else _distinct_key(int(n)), bar, bar)
+                kv if kv is not None else _distinct_key(int(n)), bar, bar,
+                mc_upper=True)
     expected_noise = float(p.sum())
     noise_bound = expected_noise + 4.0 * np.sqrt(max(expected_noise, 0.25)) + 1.0
     # Adjacent H-period labels share H-1 returns. Persistent signal ranks
@@ -707,11 +731,13 @@ def _dist_tail_le(vals: np.ndarray, pmf: np.ndarray,
 
 
 def _tied_two_sided_p(key_a: tuple[int, ...], key_b: tuple[int, ...],
-                      lo, hi) -> np.ndarray:
+                      lo, hi, mc_upper: bool = False) -> np.ndarray:
     """P(rho >= lo_i) + P(rho <= -hi_i) under the tied null of the key pair:
     exact enumeration at n <= _OUTLIER_EXACT_MAX_N, seeded MC beyond.
     ``lo``/``hi`` are the recentered upper/lower thresholds ((bar -+ c)/s);
-    scalars or arrays (returns matching length)."""
+    scalars or arrays (returns matching length). ``mc_upper`` swaps the MC
+    point estimate for a ~2-sigma upper bound on it (exact branch
+    unaffected); the perfect-rank budget reads that bound."""
     lo_arr = np.atleast_1d(np.asarray(lo, dtype=float))
     hi_arr = np.atleast_1d(np.asarray(hi, dtype=float))
     n = len(key_a)
@@ -723,6 +749,15 @@ def _tied_two_sided_p(key_a: tuple[int, ...], key_b: tuple[int, ...],
     nd = float(draws.size)
     up = (nd - np.searchsorted(draws, lo_arr - 1e-12, side="left")) / nd
     dn = np.searchsorted(draws, -hi_arr + 1e-12, side="right") / nd
+    if mc_upper:
+        # The seeded draw is unbiased, but one key pair gets one draw, so
+        # its sampling error is a fixed bias for that panel's budget (at
+        # breadth 12-14 the 200k-draw tail runs 0.57-1.26x the exact
+        # tie-free tail past p ~ 1e-4). Budget k + 1 + 2*sqrt(k + 1) hits
+        # instead of k: +2-5% in the bulk, and never below the exact tail
+        # on the tie-free lattice at breadth 11-14.
+        k = (up + dn) * nd
+        return np.minimum((k + 1.0 + 2.0 * np.sqrt(k + 1.0)) / nd, 1.0)
     return up + dn
 
 
@@ -737,7 +772,9 @@ def _spearman_tail_ge(n: int, x) -> float | np.ndarray:
     |rho| <= 0.577 and P(|rho| >= 0.40) = 0.50 vs 0.327 distinct-rank) -
     tied dates are owned by _exact_spearman_null_tied /
     _mc_spearman_null_tied, keyed on the observed rank multisets. Accepts
-    a scalar or an array of thresholds (returns matching shape)."""
+    a scalar or an array of thresholds (returns matching shape). Beyond
+    _OUTLIER_EXACT_MAX_N this is a bulk law (the 0.40 outlier bar); deep-tail
+    callers read _perfect_tail_ge."""
     scalar = np.isscalar(x)
     xs = np.atleast_1d(np.asarray(x, dtype=float))
     n = int(n)
@@ -749,6 +786,113 @@ def _spearman_tail_ge(n: int, x) -> float | np.ndarray:
         out = t_dist.sf(xc * np.sqrt((n - 2.0) / (1.0 - xc * xc)), df=n - 2)
         out = np.where(xs > 1.0, 0.0, np.where(xs <= -1.0, 1.0, out))
     return float(out[0]) if scalar else out
+
+
+@lru_cache(maxsize=16)
+def _exact_spearman_tail_dp(n: int) -> tuple[np.ndarray, np.ndarray]:
+    """Exact tie-free Spearman null at breadth n without the n! table:
+    (sorted support, tail P(rho >= support[j])), as _exact_spearman_null.
+    rho is affine in the score T = sum_k k*pi(k), and the score's law is a
+    subset DP: fill positions k = 0..n-1 in order, the state being the set
+    of values already used (a bitmask) and the partial score, so the work
+    is ~n * 2^n * (score width) instead of n! (~0.06s cold at n = 14 with
+    ~20 MB peak, then cached). Counts stay int64-exact (n! < 2^63
+    through n = 20)."""
+    full = 1 << n
+    masks = np.arange(full, dtype=np.int64)
+    pop = np.zeros(full, dtype=np.int64)
+    for b in range(n):
+        pop += (masks >> b) & 1
+    layers = [np.nonzero(pop == k)[0] for k in range(n + 1)]
+    slot = np.zeros(full, dtype=np.int64)       # mask -> row in its layer
+    for mk in layers:
+        slot[mk] = np.arange(mk.size)
+    cur = np.ones((1, 1), dtype=np.int64)      # empty prefix: T = 0
+    base = 0                                    # score of column 0
+    for k in range(n):
+        mk = layers[k]
+        w = cur.shape[1]
+        nxt = np.zeros((layers[k + 1].size, w + k * (n - 1)), dtype=np.int64)
+        for v in range(n):
+            free = ((mk >> v) & 1) == 0
+            # a fixed v maps distinct source masks to distinct targets, so
+            # the fancy-indexed += never collides
+            nxt[slot[mk[free] | (1 << v)], k * v:k * v + w] += cur[free]
+        live = np.nonzero(nxt.any(axis=0))[0]
+        cur = nxt[:, live[0]:live[-1] + 1]
+        base += int(live[0])
+    counts = cur[0]
+    t_idx = np.nonzero(counts)[0]
+    sum_k2 = (n - 1) * n * (2 * n - 1) // 6
+    # S = sum d^2 = 2*(sum k^2 - T); rho = 1 - 6S/(n^3 - n) rises with T
+    vals = 1.0 - 12.0 * (sum_k2 - (base + t_idx)) / (n * (n * n - 1.0))
+    pmf = counts[t_idx] / counts.sum()
+    tail = pmf[::-1].cumsum()[::-1]
+    return vals, tail
+
+
+def _spearman_tail_ge_conservative(n: int, x: float) -> float:
+    """Deep-tail-safe continuous P(rho >= x) for tie-free rows past
+    _PERFECT_EXACT_MAX_N: the larger of two classical laws, both read at
+    the lattice atom x reaches minus half a lattice step (S = sum d^2 is
+    even, so rho moves in steps of 12/(n^3 - n)):
+    - the Edgeworth series of Best & Roberts (AS 89), within ~0.5% of the
+      exact tail down to p ~ 1e-3 but collapsing toward 0 deeper;
+    - a Pearson type II curve matched to the exact second and fourth
+      moments of the permutation null (Var = 1/(n-1); kurtosis
+      3(25n^3 - 38n^2 - 35n + 72) / (25n(n+1)(n-1))), which is ~1-3% low
+      in the bulk but heavier than the true tail in the deep tail.
+    The t-approximation is the same curve with the fourth moment not
+    matched (kurtosis 3(n-1)/(n+1)), which is why it undercounts. Against
+    the exact law at n = 11..16 the maximum is at most ~0.3% below the
+    true tail, and against 3e7-8e7-draw permutation Monte Carlo at
+    n = 17..200 it is within Monte Carlo error (~1%); it runs 1.0-1.5x
+    above the tail for p in [1e-4, 1e-3) at n >= 15 and more deeper in,
+    which costs only noise budget no realistic panel observes."""
+    n3 = float(n) * (n * n - 1.0)
+    # largest even S reached by rho >= x (atoms at x included)
+    s_hi = n3 * (1.0 - float(x) + 1e-12) / 6.0
+    if s_hi < 0.0:
+        return 0.0
+    s_at = 2.0 * np.floor(s_hi / 2.0)
+    if s_at >= n3 / 3.0:                    # every permutation qualifies
+        return 1.0
+    rc = 1.0 - 6.0 * (s_at + 1.0) / n3      # continuity-corrected rho
+    c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12 = _AS89_COEF
+    # plain Python floats: past z ~ 37.6 (the 0.90 bar at ~1,750 names)
+    # exp(-y/2) underflows, which math.exp returns as 0.0 where a numpy
+    # scalar would raise under np.seterr(all='raise')
+    b = 1.0 / n
+    z = float(rc) * math.sqrt(n - 1.0)
+    y = z * z
+    u = z * b * (c1 + b * (c2 + c3 * b) + y * (
+        -c4 + b * (c5 + c6 * b) - y * b * (
+            c7 + c8 * b - y * (c9 - c10 * b + y * b * (c11 - c12 * y)))))
+    edge = min(max(u * math.exp(-y / 2.0) + float(norm.sf(z)), 0.0), 1.0)
+    kurt = (3.0 * (25.0 * n ** 3 - 38.0 * n ** 2 - 35.0 * n + 72.0)
+            / (25.0 * n * (n + 1.0) * (n - 1.0)))
+    u2 = 2.0 * kurt / (3.0 - kurt)          # 2m + 3 for (1 - (r/c)^2)^m
+    half_width = np.sqrt(u2 / (n - 1.0))    # c: matches Var = 1/(n-1)
+    shape = (u2 - 1.0) / 2.0                # m + 1
+    pearson = float(beta_dist.sf((rc / half_width + 1.0) / 2.0,
+                                 shape, shape))
+    return max(edge, pearson)
+
+
+def _perfect_tail_ge(n: int, x: float) -> float:
+    """P(rho >= x) for a tie-free row at the perfect-rank bar, where the
+    deep tail carries the whole budget: the enumerated exact null through
+    _OUTLIER_EXACT_MAX_N (the same table the outlier check reads), the
+    exact subset-DP null through _PERFECT_EXACT_MAX_N, and the
+    conservative Edgeworth / Pearson II maximum beyond. Never the
+    t-approximation, which runs 20-60% low here."""
+    n = int(n)
+    if n <= _OUTLIER_EXACT_MAX_N:
+        return float(_spearman_tail_ge(n, float(x)))
+    if n <= _PERFECT_EXACT_MAX_N:
+        vals, tail = _exact_spearman_tail_dp(n)
+        return float(_dist_tail_ge(vals, tail, np.array([float(x)]))[0])
+    return _spearman_tail_ge_conservative(n, float(x))
 
 
 def _null_bulk_abs_z_quantile(n: int, bar: float, q: float) -> float:

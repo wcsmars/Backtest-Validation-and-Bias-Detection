@@ -62,7 +62,7 @@ def _third_party_imports(pkg_dir: Path) -> set[str]:
     """Top-level absolute imports across the package, minus stdlib and self."""
     found: set[str] = set()
     for py in sorted(pkg_dir.rglob("*.py")):
-        tree = ast.parse(py.read_text(), filename=str(py))
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 found.update(alias.name.split(".")[0] for alias in node.names)
@@ -169,7 +169,7 @@ def test_ci_matrix_covers_every_supported_interpreter_and_major() -> None:
     # ``numpy1`` job installs the last 1.x, while the ``latest`` jobs resolve
     # NumPy 2 and pandas 3. No ``continue-on-error`` canary may hide a red
     # interpreter behind a green badge.
-    ci = (REPO_ROOT / ".github" / "workflows" / "tests.yml").read_text()
+    ci = (REPO_ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
     for minor in (10, 11, 12, 13):
         assert f'"3.{minor}"' in ci, f"CI matrix does not test Python 3.{minor}"
     assert "continue-on-error" not in ci, "no non-blocking canary jobs"

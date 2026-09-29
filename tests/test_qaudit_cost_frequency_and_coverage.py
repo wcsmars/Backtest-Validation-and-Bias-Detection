@@ -444,6 +444,29 @@ def test_above_cap_yield_still_warns():
     assert r.status is Status.WARN
 
 
+@pytest.mark.parametrize("ppy,coarse", [(12, True), (252, False)])
+def test_dividend_waiver_wording_names_bar_frequency(ppy, coarse):
+    # The one-sided waiver applies at every frequency (5bp/bar sits under
+    # the 15%/yr cap at ppy=252 as well), but only coarse bars may be called
+    # "coarse bar frequency": on daily bars ordinary dividends are sparse,
+    # so an every-bar offset is income accrued each bar.
+    if coarse:
+        px, price_ret, _ = _monthly_income()
+    else:
+        rng = np.random.default_rng(3)
+        dates = pd.bdate_range("2019-01-02", periods=500)
+        cols = [f"D{i:02d}" for i in range(15)]
+        price_ret = pd.DataFrame(rng.normal(0.0003, 0.012, (500, 15)),
+                                 index=dates, columns=cols)
+        px = pd.DataFrame(100.0 * (1.0 + price_ret).cumprod(),
+                          index=dates, columns=cols)
+    r = _price_result(px, price_ret + 5e-4, ppy=ppy)
+    assert r.status is Status.PASS, r.message
+    assert r.details["median_abs_diff"] > 1e-4
+    assert ("coarse bar frequency" in r.message) is coarse
+    assert ("every bar" in r.message) is (not coarse)
+
+
 # ===========================================================================
 # 9. cost_sensitivity PASS message truthfulness
 # ===========================================================================

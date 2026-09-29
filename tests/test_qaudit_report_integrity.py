@@ -1,6 +1,7 @@
 """Dispatch, gate, provenance, and report-rendering integrity.
 
-Coverage includes partial module output, filtered deployment requirements,
+Coverage includes partial module output, unregistered and duplicate check
+ids, filtered deployment requirements,
 unambiguous provenance framing, deterministic serialization, empty patterns,
 and HTML from callback exception text.
 """
@@ -11,6 +12,7 @@ import pandas as pd
 import pytest
 
 import qaudit.api as api
+import qaudit.checks.costs as costs_module
 from qaudit import (AuditConfig, AuditFailure, BacktestArtifacts,
                     CheckRuntimeError, InputValidationError, audit)
 from qaudit.config import (_MAX_COST_SWEEP_POINTS, _MAX_DYNAMIC_RUNS,
@@ -51,6 +53,43 @@ def test_nonempty_partial_module_output_raises_in_strict_mode(monkeypatch):
         lambda *args, **kwargs: [passed("costs.no_cost_declaration", "only")],
     )
     with pytest.raises(CheckRuntimeError, match="partial family output"):
+        audit(_dense_art(), include=["costs"], strict=True)
+
+
+_REAL_COSTS_RUN = costs_module.run
+
+# One extra result on top of the module's complete output: an id the
+# registry does not know, or a second copy of a registered id.
+_EXTRA_RESULT_CASES = [("costs.bogus_extra", "unregistered check id"),
+                       ("costs.no_cost_declaration", "duplicate check id")]
+
+
+def _costs_run_with_extra(extra_id):
+    def run(*args, **kwargs):
+        return list(_REAL_COSTS_RUN(*args, **kwargs)) + [
+            passed(extra_id, "extra result")]
+    return run
+
+
+@pytest.mark.parametrize("extra_id, phrase", _EXTRA_RESULT_CASES)
+def test_extra_module_result_is_a_branded_error(monkeypatch, extra_id, phrase):
+    monkeypatch.setattr("qaudit.checks.costs.run",
+                        _costs_run_with_extra(extra_id))
+    report = audit(_dense_art(), include=["costs"])
+    assert not report.ok
+    (error,) = report.errors
+    assert error.check == "costs.<module>"
+    assert phrase in error.message
+    assert extra_id in error.message
+    # The module's genuine results are withheld with the stray one.
+    assert [r.check for r in report.results] == ["costs.<module>"]
+
+
+@pytest.mark.parametrize("extra_id, phrase", _EXTRA_RESULT_CASES)
+def test_extra_module_result_raises_in_strict_mode(monkeypatch, extra_id, phrase):
+    monkeypatch.setattr("qaudit.checks.costs.run",
+                        _costs_run_with_extra(extra_id))
+    with pytest.raises(CheckRuntimeError, match=phrase):
         audit(_dense_art(), include=["costs"], strict=True)
 
 

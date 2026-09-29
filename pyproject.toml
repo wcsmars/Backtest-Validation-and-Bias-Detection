@@ -50,6 +50,10 @@ dev = [
 qaudit = "qaudit.cli:cli"
 qaudit-demo = "qaudit.demo:cli"
 
+[project.urls]
+Issues = "https://github.com/wcsmars/Backtest-Validation-and-Bias-Detection/issues"
+Repository = "https://github.com/wcsmars/Backtest-Validation-and-Bias-Detection"
+
 [tool.setuptools]
 include-package-data = false
 

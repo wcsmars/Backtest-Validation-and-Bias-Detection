@@ -20,11 +20,13 @@ from qaudit.config import _MAX_DYNAMIC_RUNS
 from qaudit.dynamic.probes_null import (
     _MIN_PLACEBO_RANDOMIZATION_RUNS, _PHI_MIN_OBS,
     _PLACEBO_SPARSE_ACTIVITY, _SHUFFLE_BLOCK_MAX_DIV,
-    _SHUFFLE_PHI_NEGLIGIBLE, _auto_block_len, _block_perm,
-    _check_placebo_percentile, _placebo_panel, _placebo_panel_sparse,
-    _returns_dependence, _returns_phi, _signal_activity, _signal_phi, run)
+    _SHUFFLE_PHI_NEGLIGIBLE, _XSEC_MIN_ASSETS, _auto_block_len, _block_perm,
+    _check_placebo_percentile, _lag1_autocorr_by_column, _placebo_panel,
+    _placebo_panel_sparse, _rank_corr_to_ar1, _returns_dependence,
+    _returns_phi, _signal_activity, _signal_phi, _xsec_rank_phi, run)
 from qaudit.errors import AuditFailure, InputValidationError
-from qaudit.synthetic import make_backtest_func, make_clean, simulate_market
+from qaudit.synthetic import (make_backtest_func, make_clean,
+                              positions_from_signals, simulate_market)
 from qaudit.types import Severity, Status
 
 PCT = "dynamic.placebo_percentile"
@@ -241,18 +243,68 @@ def test_clean_book_percentile_pins_unchanged_honest_guard(clean_results):
     assert "100th percentile" in r.message
 
 
-# Compare raw performance on both sides; report hedged context separately.
+# Rank exposure-hedged Sharpes on both sides; report raw context separately.
 
-def test_percentile_details_carry_hedged_context(clean_results):
+def test_percentile_details_carry_raw_context(clean_results):
     r = clean_results[PCT]
+    assert r.details["sr_basis"] == "hedged"
     assert np.isfinite(r.details["actual_sr_hedged"])
     assert np.isfinite(r.details["null_q50_hedged"])
-    # the hedged actual is the shuffled_labels gate value on this book
+    # the ranked actual is the hedged one: the shuffled_labels gate value
+    assert r.details["actual_sr"] == r.details["actual_sr_hedged"]
     assert r.details["actual_sr_hedged"] == pytest.approx(
         clean_results[SHUF].details["actual_sr"])
-    # the verdict is still the raw ranking: identical to recomputing it
+    assert r.details["null_q50"] == r.details["null_q50_hedged"]
+    # raw figures stay in details (this dollar-neutral book barely differs)
+    assert r.details["actual_sr_raw"] == pytest.approx(1.79, abs=0.02)
+    assert np.isfinite(r.details["null_q50_raw"])
     assert r.details["percentile"] == 1.0
     assert r.details["null_q50_hedged"] < r.details["actual_sr_hedged"]
+
+
+def test_percentile_ranks_hedged_sharpes_when_supplied():
+    # a book whose raw edge is its market exposure: the raw ranking PASSes,
+    # the hedged one (what run() supplies) does not
+    raw_null = np.linspace(-1.0, 0.5, 40)
+    hedged_null = np.linspace(-1.0, 1.0, 40)
+    raw_only = _check_placebo_percentile(AuditConfig(), raw_null, 1.5, 0)
+    assert raw_only.status is Status.PASS
+    assert raw_only.details["sr_basis"] == "raw"
+    r = _check_placebo_percentile(AuditConfig(), raw_null, 1.5, 0,
+                                  actual_sr_hedged=0.1,
+                                  placebo_hedged=hedged_null)
+    assert r.status is Status.WARN and r.severity is Severity.HIGH
+    assert r.details["sr_basis"] == "hedged"
+    assert r.details["actual_sr"] == 0.1
+    assert r.details["actual_sr_raw"] == 1.5
+    assert r.details["null_q50"] == pytest.approx(0.0, abs=1e-12)
+    assert r.details["null_q50_raw"] == pytest.approx(-0.25)
+    assert "actual annualized SR 0.10 net of market exposure (raw 1.50)" \
+        in r.message
+    assert "random-signal outcomes hedged the same way" in r.message
+    assert "market exposure alone is not a signal edge" in r.remediation
+
+
+def test_pure_market_exposure_actual_warns_without_a_rank():
+    # only the actual book is exactly linear in the basket: nothing beyond
+    # exposure to rank, and no p-value that would read as 1/(n+1)
+    r = _check_placebo_percentile(AuditConfig(), np.linspace(-1.0, 0.5, 40),
+                                  1.2, 0, actual_sr_hedged=float("nan"),
+                                  placebo_hedged=np.linspace(-1.0, 1.0, 40))
+    assert r.status is Status.WARN and r.severity is Severity.HIGH
+    assert "pure market exposure" in r.message
+    assert np.isnan(r.details["p_value"])
+    assert np.isnan(r.details["percentile"])
+
+
+def test_fewer_than_two_hedged_placebos_count_as_hedge_dust():
+    # fail closed: one hedged placebo cannot rank anything net of exposure
+    r = _check_placebo_percentile(AuditConfig(), np.linspace(-1.0, 0.5, 40),
+                                  1.2, 0, actual_sr_hedged=0.3,
+                                  placebo_hedged=np.array([0.1]))
+    assert r.status is Status.WARN and r.severity is Severity.HIGH
+    assert "39/40 placebo re-runs produced PnL exactly linear" in r.message
+    assert r.details["sr_basis"] == "raw"
 
 
 def test_hedge_dust_percentile_reports_nan_hedged_context(flat_market):
@@ -263,6 +315,55 @@ def test_hedge_dust_percentile_reports_nan_hedged_context(flat_market):
                 backtest_func=basket_func))[PCT]
     assert np.isnan(r.details["actual_sr_hedged"])
     assert np.isnan(r.details["null_q50_hedged"])
+
+
+def test_partial_hedge_dust_is_named_and_not_ranked():
+    # 3 of 40 placebo runs were exactly linear in the basket: the hedged
+    # null holds the other 37, and the message and details say so
+    r = _check_placebo_percentile(AuditConfig(), np.linspace(-1.0, 0.5, 40),
+                                  1.2, 0, n_hedge_dust=3,
+                                  actual_sr_hedged=1.5,
+                                  placebo_hedged=np.linspace(-1.0, 1.0, 37))
+    assert r.status is Status.PASS
+    assert r.details["sr_basis"] == "hedged"
+    assert r.details["n"] == 37 and r.details["n_hedge_dust"] == 3
+    assert r.details["p_value"] == pytest.approx(1.0 / 38.0)
+    assert "of 37 random-signal outcomes hedged the same way" in r.message
+    assert ("3 placebo re-run(s) with PnL exactly linear in the "
+            "equal-weight basket have no active component and are not "
+            "ranked") in r.message
+    clean_null = _check_placebo_percentile(
+        AuditConfig(), np.linspace(-1.0, 0.5, 40), 1.2, 0,
+        actual_sr_hedged=1.5, placebo_hedged=np.linspace(-1.0, 1.0, 40))
+    assert clean_null.details["n_hedge_dust"] == 0
+    assert "equal-weight basket" not in clean_null.message
+
+
+def test_run_counts_basket_linear_placebo_runs(flat_market):
+    # a pipeline that holds the plain basket on 3 of 25 placebo panels:
+    # run() leaves those runs out of the hedged null and counts them
+    calls = {"n": 0}
+
+    def basket_on_three_placebos(signals, asset_returns):
+        calls["n"] += 1
+        if calls["n"] in (3, 6, 10):  # call 1: actual; 2 to 26: placebos
+            return asset_returns.mean(axis=1)
+        w = signals.shift(1)
+        w = w.sub(w.mean(axis=1), axis=0)
+        w = w.div(w.abs().sum(axis=1).replace(0.0, np.nan), axis=0)
+        return (w.fillna(0.0) * asset_returns.fillna(0.0)).sum(axis=1)
+
+    sig = pd.DataFrame(np.random.default_rng(6).standard_normal(flat_market.shape),
+                       index=flat_market.index, columns=flat_market.columns)
+    art = BacktestArtifacts(signals=sig, asset_returns=flat_market).aligned()
+    res = _by(run(art, AuditConfig(n_placebo=25, n_shuffle=2, seed=0),
+                  backtest_func=basket_on_three_placebos))
+    pct = res[PCT]
+    assert pct.details["sr_basis"] == "hedged"
+    assert pct.details["n_hedge_dust"] == 3 and pct.details["n"] == 22
+    assert "3 placebo re-run(s) with PnL exactly linear" in pct.message
+    assert "22 random-signal outcomes hedged the same way" in pct.message
+    assert res[BIAS].details["n"] == 22
 
 
 # Structure-matched placebos for sparse and event signals.
@@ -459,6 +560,9 @@ def test_sparse_run_is_deterministic_and_names_sparse_panels(flat_market,
     assert "structure-matched sparse placebo panels" in a[BIAS].message
     assert "4.2% of cells active" in a[BIAS].message
     assert a[BIAS].status is Status.PASS       # honest engine stays green
+    # the percentile names its null as what it is: the real signal rotated
+    assert "time-rotated-signal outcomes" in a[PCT].message
+    assert "random-signal" not in a[PCT].message
 
 
 def test_dense_book_keeps_ar1_path(clean_results):
@@ -688,6 +792,122 @@ def test_two_bar_asset_in_the_grid_does_not_crash_the_null_probes(clean):
     assert res[BIAS].status is Status.PASS
     assert res[SHUF].details["shuffle_block_len"] == 1
     assert abs(res[SHUF].details["returns_lag1_autocorr"]) < _SHUFFLE_PHI_NEGLIGIBLE
+
+
+# Placebo persistence as the pipeline trades it: the cross-sectional arm.
+
+def _static_score(seed, n_assets=30, n_periods=750, noise=0.3):
+    """A static N(0,1) per-asset level plus iid noise, with no-alpha iid
+    returns: each column's own lag-1 autocorrelation is ~0 (autocorr removes
+    the level), yet the cross-sectional ranking barely moves."""
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2018-01-01", periods=n_periods)
+    cols = [f"A{i:02d}" for i in range(n_assets)]
+    rets = pd.DataFrame(0.015 * rng.standard_normal((n_periods, n_assets)),
+                        index=idx, columns=cols)
+    level = rng.standard_normal(n_assets)
+    sig = pd.DataFrame(level[None, :]
+                       + noise * rng.standard_normal((n_periods, n_assets)),
+                       index=idx, columns=cols)
+    return sig, rets
+
+
+def _rank_turnover(sig, rets):
+    """Mean traded dollars per bar of the shipped rank long-short book."""
+    pos = positions_from_signals(sig, lag=1)
+    return float(traded_dollars_series(pos, rets).iloc[1:].mean())
+
+
+def test_signal_phi_sees_a_static_per_asset_level():
+    sig, _ = _static_score(0)
+    column = float(np.nanmedian(_lag1_autocorr_by_column(sig)))
+    assert abs(column) < 0.05                   # the per-column arm is blind
+    # consecutive cross-sections correlate at 1 / (1 + 0.3**2) = 0.917
+    assert _signal_phi(sig) == pytest.approx(1 / 1.09, abs=0.04)
+    # honest guards: an AR(1) signal keeps its persistence, iid noise ~0
+    idx, cols = sig.index, sig.columns
+    assert _signal_phi(_ar1_signal(3, 0.9, idx, cols)) == pytest.approx(
+        0.9, abs=0.03)
+    assert _signal_phi(pd.DataFrame(np.random.default_rng(4).standard_normal(
+        sig.shape), index=idx, columns=cols)) < 0.1
+
+
+def test_static_score_placebo_matches_the_real_books_turnover():
+    # measured: 0.95-1.00x from 30 names; the per-column phi (~0) churned
+    # the placebo book at ~3.7x the real one's turnover
+    sig, rets = _static_score(0)
+    real = _rank_turnover(sig, rets)
+    phi = _signal_phi(sig)
+    ratios = [_rank_turnover(_placebo_panel(sig, phi,
+                                            np.random.default_rng(k)), rets)
+              / real for k in range(3)]
+    assert all(0.8 <= x <= 1.2 for x in ratios), ratios
+    iid = _rank_turnover(_placebo_panel(sig, 0.0, np.random.default_rng(0)),
+                         rets)
+    assert iid / real > 3.0
+
+
+@pytest.mark.parametrize("seed", [0, 3])
+def test_costly_static_score_book_without_alpha_does_not_pass(seed):
+    # 10 bps through the rank book: with phi ~0 the iid placebos drowned in
+    # costs (null median ~-6.6) and this losing book (SR ~-2.1 / -2.7)
+    # cleared the percentile at p=1/41; matched, the null sits at its own
+    # cost drag
+    sig, rets = _static_score(seed)
+    art = BacktestArtifacts(signals=sig, asset_returns=rets,
+                            signal_lag=1).aligned()
+    res = _by(run(art, AuditConfig(seed=seed, n_placebo=40, n_shuffle=2),
+                  backtest_func=make_backtest_func(lag=1, costs_bps=10.0)))
+    assert res[PCT].status is Status.WARN, res[PCT].message
+    assert res[PCT].details["p_value"] > 0.2
+    assert res[BIAS].details["phi"] > 0.85
+    assert res[PCT].details["null_q50"] > -3.0
+
+
+def test_rank_corr_to_ar1_inverts_the_finite_sample_expectation():
+    def expected(r, n):
+        return 6 / (np.pi * (n + 1)) * (np.arcsin(r)
+                                        + (n - 2) * np.arcsin(r / 2))
+    for n in (5, 10, 30, 200):
+        for r in (-0.6, 0.0, 0.5, 0.9, 0.99):
+            assert _rank_corr_to_ar1(expected(r, n), n) == pytest.approx(
+                r, abs=2e-4)
+    assert _rank_corr_to_ar1(1.0, 30) == 1.0
+    assert _rank_corr_to_ar1(-1.0, 30) == -1.0
+    # many names: the population relation r = 2 sin(pi rho / 6)
+    assert _rank_corr_to_ar1(0.8, 10 ** 6) == pytest.approx(
+        2 * np.sin(np.pi * 0.8 / 6), abs=1e-3)
+    # few names: more persistence than the population relation, which
+    # would leave the placebo too churny
+    assert _rank_corr_to_ar1(0.9, 10) > 2 * np.sin(np.pi * 0.9 / 6) + 0.02
+
+
+def test_cross_sectional_arm_needs_five_names_and_twenty_pairs():
+    # 4 names: rank correlations too coarse, the per-column arm alone
+    sig4, _ = _static_score(1, n_assets=_XSEC_MIN_ASSETS - 1)
+    assert np.isnan(_xsec_rank_phi(sig4))
+    column = float(np.nanmedian(_lag1_autocorr_by_column(sig4)))
+    assert _signal_phi(sig4) == max(column, 0.0)
+    sig5, _ = _static_score(1, n_assets=_XSEC_MIN_ASSETS)
+    assert _xsec_rank_phi(sig5) > 0.5
+    # _PHI_MIN_OBS rows hold one pair too few
+    assert np.isnan(_xsec_rank_phi(sig5.iloc[:_PHI_MIN_OBS]))
+    assert np.isfinite(_xsec_rank_phi(sig5.iloc[:_PHI_MIN_OBS + 1]))
+
+
+def test_cross_sectional_arm_skips_unordered_rows_without_warnings():
+    sig, _ = _static_score(2)
+    sig.iloc[::3] = 0.0                  # all-zero rows have no ordering
+    sig.iloc[5, :] = np.nan              # a dead date
+    sig.iloc[:, 0] = np.nan              # a never-observed name
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert _xsec_rank_phi(sig) > 0.5
+        assert np.isnan(_xsec_rank_phi(pd.DataFrame(0.0, index=range(60),
+                                                     columns=range(8))))
+        assert np.isnan(_xsec_rank_phi(pd.DataFrame(np.nan, index=range(60),
+                                                     columns=range(8))))
+        assert np.isnan(_xsec_rank_phi(pd.DataFrame(np.zeros((0, 8)))))
 
 
 def _ar_garch_returns(seed, phi, n_t=600, n_a=20):

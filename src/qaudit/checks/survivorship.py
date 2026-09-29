@@ -191,8 +191,20 @@ TOU_MIN_MEASURABLE_FRAC = 0.5
 # bar frequency; monthly or coarser bars floor to zero. Genuine short
 # membership churn is excluded from the rate and warns only when plausible
 # attrition is insufficient. Terminal exits also need follow-up beyond
-# this window, since a final missing row can mimic an exit.
+# this window, since a final missing row can mimic an exit; the follow-up
+# runs to the last bar on which any asset has a finite return, because a
+# trailing block of all-NaN return rows observes nothing.
 NO_EXITS_FLICKER_MAX_OUT_DAILY_BARS = 10
+
+# Mass simultaneous exits do not establish attrition either: delistings and
+# index deletions remove a handful of names per bar, and even an annual
+# reconstitution replaces well under half of an index at once. A bar on
+# which at least this fraction of the members live just before it (and at
+# least NO_EXITS_MASS_MIN_NAMES names) leaves together is a membership feed
+# gap or a padded tail (a short constituents file reindexed with
+# fill_value=False), so its exits are excluded from the rate like flicker.
+NO_EXITS_MASS_EXIT_FRAC = 0.5
+NO_EXITS_MASS_MIN_NAMES = 2
 
 # Calendar-time support floor for attrition evidence: real universes lose
 # names at a few %/year, so ~a year of history is needed at any bar
@@ -931,7 +943,7 @@ def _positions_on_missing_returns(artifacts: BacktestArtifacts) -> CheckResult:
             f"({frac:.2%} of gross exposure) sit on NaN asset returns in "
             f"terminal or > "
             f"{MARKET_CLOSURE_MAX_RUN_BARS}-bar gaps (first: {first_asset} "
-            f"on {first_date}); their PnL silently becomes 0 - a delisting "
+            f"on {first_date}); their PnL silently becomes 0: a delisting "
             f"loss you never paid (tolerance "
             f"{MISSING_RETURN_FRAC:.1%}){closure_note}.",
             severity=Severity.HIGH,
@@ -1127,7 +1139,7 @@ def _positions_on_missing_returns(artifacts: BacktestArtifacts) -> CheckResult:
             f"tolerance {MISSING_RETURN_MAX_BAR_GROSS:.0%}; aggregate "
             f"{frac:.2%} of gross is under the {MISSING_RETURN_FRAC:.1%} "
             f"tolerance): that bar's PnL on the missing name(s) silently "
-            f"became 0 - on a concentrated holding this is a whole-book "
+            f"became 0; on a concentrated holding this is a whole-book "
             f"loss (or gain) that never printed{closure_note}.",
             severity=Severity.HIGH,
             remediation=(
@@ -1258,34 +1270,50 @@ def _no_exits(artifacts: BacktestArtifacts, config: AuditConfig) -> CheckResult:
     # signature of scattered NaN membership cells, not delistings.
     flicker_window = int(np.floor(
         NO_EXITS_FLICKER_MAX_OUT_DAILY_BARS * ppy / DAILY_BARS_PER_YEAR))
+    # Follow-up past a terminal exit is measured to the last bar with any
+    # finite asset return, not to the last grid row: members that "exit"
+    # into a trailing all-NaN returns block (a universe stopping together
+    # with the returns feed) were never observed after the exit.
+    observed_rows = np.flatnonzero(np.isfinite(
+        artifacts.asset_returns.to_numpy(dtype=float)).any(axis=1))
+    last_observed = (int(observed_rows[-1]) if observed_rows.size
+                     else int(n_periods) - 1)
+    # Mass-exit prong (see NO_EXITS_MASS_EXIT_FRAC): names leaving on each
+    # transition vs names live just before it.
+    exits_per_bar = exits.sum(axis=1)
+    mass_bar = ((exits_per_bar >= NO_EXITS_MASS_MIN_NAMES)
+                & (exits_per_bar
+                   >= NO_EXITS_MASS_EXIT_FRAC * uni_arr[:-1].sum(axis=1)))
     n_flicker_events = 0
     n_unverifiable_events = 0
+    n_mass_events = 0
     plausible = np.zeros(n_grid_assets, dtype=bool)
-    if flicker_window < 1:
-        plausible = exits.any(axis=0)            # coarse bars: prong idle
-    else:
-        for j in range(n_grid_assets):
-            exit_rows = np.flatnonzero(exits[:, j])
-            if exit_rows.size == 0:
+    for j in range(n_grid_assets):
+        exit_rows = np.flatnonzero(exits[:, j])
+        if exit_rows.size == 0:
+            continue
+        true_rows = np.flatnonzero(uni_arr[:, j])
+        for t in exit_rows:
+            nxt = int(np.searchsorted(true_rows, t + 1))
+            if nxt >= len(true_rows):
+                # terminal: never re-enters - but only plausible when
+                # the sample actually observes more than a flicker
+                # window past the exit. A fabricated exit on the last
+                # bar(s) (one NaN or all-False row at the sample end)
+                # would otherwise mint an unfalsifiable "terminal"
+                # delisting for every name at once. On monthly or
+                # coarser bars (window 0) this still needs one observed
+                # bar after the exit.
+                if last_observed - int(t) <= flicker_window:
+                    n_unverifiable_events += 1
+                    continue
+            elif int(true_rows[nxt]) - int(t) - 1 <= flicker_window:
+                n_flicker_events += 1            # re-entered too soon
                 continue
-            true_rows = np.flatnonzero(uni_arr[:, j])
-            for t in exit_rows:
-                nxt = int(np.searchsorted(true_rows, t + 1))
-                if nxt >= len(true_rows):
-                    # terminal: never re-enters - but only plausible when
-                    # the sample actually observes more than a flicker
-                    # window past the exit. A fabricated exit on the last
-                    # bar(s) (one NaN or all-False row at the sample end)
-                    # would otherwise mint an unfalsifiable "terminal"
-                    # delisting for every name at once.
-                    if int(n_periods) - 1 - int(t) > flicker_window:
-                        plausible[j] = True
-                    else:
-                        n_unverifiable_events += 1
-                elif int(true_rows[nxt]) - int(t) - 1 > flicker_window:
-                    plausible[j] = True          # stayed out long enough
-                else:
-                    n_flicker_events += 1
+            if mass_bar[t]:
+                n_mass_events += 1               # feed gap, not attrition
+            else:
+                plausible[j] = True
     n_exiting = int(plausible.sum())
     years = n_periods / float(artifacts.periods_per_year)
     # Measure exits per member-year of actual universe exposure, so a panel
@@ -1317,6 +1345,8 @@ def _no_exits(artifacts: BacktestArtifacts, config: AuditConfig) -> CheckResult:
                    n_exit_events=n_exit_events,
                    n_flicker_exit_events=n_flicker_events,
                    n_unverifiable_exit_events=n_unverifiable_events,
+                   n_mass_exit_events=n_mass_events,
+                   mass_exit_min_frac=NO_EXITS_MASS_EXIT_FRAC,
                    flicker_max_out_bars=flicker_window)
     remediation = (
         "Rebuild the universe from point-in-time constituent history "
@@ -1327,17 +1357,25 @@ def _no_exits(artifacts: BacktestArtifacts, config: AuditConfig) -> CheckResult:
                     and exit_rate >= config.min_exit_rate_per_year)
     raw_ok = (n_exiting_raw > 0
               and raw_rate >= config.min_exit_rate_per_year)
-    n_implausible = n_flicker_events + n_unverifiable_events
+    n_implausible = n_flicker_events + n_unverifiable_events + n_mass_events
     edge_txt = (f" and {n_unverifiable_events} exit within "
-                f"{flicker_window} bar(s) of the sample end (too close to "
-                f"the edge to verify)" if n_unverifiable_events else "")
+                f"{flicker_window} bar(s) of the sample end (the last bar "
+                f"with any finite asset return; too close to the edge to "
+                f"verify)" if n_unverifiable_events else "")
+    edge_txt += (f" and {n_mass_events} exit event(s) on bar(s) where at "
+                 f"least {NO_EXITS_MASS_EXIT_FRAC:.0%} of the live members "
+                 f"leave at once (a membership feed gap or padded tail, "
+                 f"not attrition)" if n_mass_events else "")
     if n_implausible and raw_ok and not plausible_ok:
         # Raw transitions suggest sufficient attrition, but plausible exits do
         # not. Brief membership gaps and sample-edge exits cannot establish a
         # healthy exit rate, so this discrepancy receives the higher warning.
+        header = ("universe membership flickers rather than attrites"
+                  if n_flicker_events else
+                  "universe exits do not evidence attrition")
         return warned(
             check,
-            f"universe membership flickers rather than attrites: "
+            f"{header}: "
             f"{n_flicker_events} of {n_exit_events} exit event(s) re-enter "
             f"within {flicker_window} bar(s){edge_txt} (a real delisting "
             f"exit is terminal, or stays out at least through the next "
@@ -1347,15 +1385,18 @@ def _no_exits(artifacts: BacktestArtifacts, config: AuditConfig) -> CheckResult:
             f"{config.min_exit_rate_per_year:.0%}/year floor) where the "
             f"raw transition count suggested {n_exiting_raw} "
             f"({raw_rate:.1%}/year) - the signature of scattered universe "
-            f"NaN cells decoding to False (fabricated membership), not "
-            f"point-in-time attrition.",
+            f"NaN cells decoding to False, or of a membership feed that "
+            f"stops or gaps for the whole universe at once (fabricated "
+            f"membership), not point-in-time attrition.",
             severity=Severity.HIGH,
             remediation=(
                 "Resolve NaN membership explicitly (universe.ffill(), or "
                 "fillna(False) if the names were genuinely out) and "
                 "rebuild the universe from point-in-time constituent "
                 "history - quick out-and-back membership blips are data "
-                "holes, not delistings."),
+                "holes, not delistings. Stamp membership through the last "
+                "bar with asset returns (trim the grid otherwise) instead "
+                "of padding a short constituents feed with False."),
             details=details)
     flick_note = (
         f" ({n_flicker_events} of {n_exit_events} exit event(s) re-enter "

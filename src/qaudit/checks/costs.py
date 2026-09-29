@@ -73,6 +73,11 @@ MIN_GROSS_SR_FOR_SENSITIVITY = 0.5
 # ...and implied vs declared costs are called discrepant when they differ by
 # more than this factor either way.
 DECLARED_IMPLIED_MISMATCH_FACTOR = 3.0
+# Inside that tolerance a PASS still names a declaration off by at least
+# this factor either way (informational, no status change): a factor of 2
+# is the classic one-way vs round-trip confusion, which no other check can
+# see once the per-date drag reconciles at the implied cost.
+DECLARED_IMPLIED_NOTE_FACTOR = 2.0
 # Net sitting above gross (negative implied cost) beyond this many bps means
 # the artifacts do not describe the same backtest - costs cannot be negative.
 # The tolerance absorbs reconstruction noise from NaN masking on honest books.
@@ -117,6 +122,21 @@ CASH_CARRY_MAX_RESID_FRAC = 0.25        # residual std / fitted per-bar carry:
 #   date-level structure the line cannot absorb - 0.25 is economics, not
 #   numerics.
 CASH_CARRY_MIN_DATES = 60              # minimum dates for the two-parameter fit
+# The waiver bounds carry by 1 - gross exposure, so it never covers a
+# unit-gross long/short book, even though such a book's self-financing cash
+# balance (collateral plus short proceeds) is 1 - net exposure, about 100%
+# of NAV, and backtests commonly credit interest on it. That is a deliberate
+# guard (a dollar-neutral book would otherwise have a ~15%/yr allowance for
+# any constant PnL boost); the honest route is to declare the interest as a
+# CASH column, which the negative-implied-cost and not-per-trade verdicts
+# name in their remediation.
+_CASH_COLUMN_REMEDIATION = (
+    "If net includes interest credited on cash or collateral (including "
+    "short proceeds on a long/short book), declare it so the "
+    "reconstruction sees it: add a CASH column to asset_returns at the "
+    "per-bar rate, a CASH position equal to 1 - net exposure, and an "
+    "all-NaN CASH signals column. The cash-carry waiver bounds carry by "
+    "1 - gross exposure, so it never covers a unit-gross long/short book.")
 
 # The net-vs-gross overlap must carry a representative share of the book's
 # trading: mean dollars traded on the compared (non-NaN) dates below this
@@ -185,7 +205,11 @@ MIN_OVERLAP_TRADED_SHARE = 0.99
 # scale of daily vol (~100bp). A mismatch confined to a minority of assets
 # (mixed-vendor feeds) leaves the median clean, so a second, pervasiveness
 # prong counts discrepant cells independently of the median (see
-# PRICE_RETURN_PERVASIVE_FRAC below).
+# PRICE_RETURN_PERVASIVE_FRAC below), and a third, per-asset prong judges
+# each compared asset on its own median, whatever the pooled fraction: a
+# one-bar shift on 1 of 30 assets puts only ~3% of cells at daily-vol scale,
+# far below the pervasive bar, yet that asset's own median sits at ~200bp
+# while honest assets median at 0 (their dividends are sparse).
 PRICE_RETURN_MEDIAN_TOL = 1e-4      # median |derived - declared| per day
 PRICE_RETURN_POINT_TOL = 1e-3       # a cell counts as discrepant above 10bp
 PRICE_RETURN_PERVASIVE_FRAC = 0.25  # discrepant-cell share that (a) lifts a
@@ -194,7 +218,12 @@ PRICE_RETURN_PERVASIVE_FRAC = 0.25  # discrepant-cell share that (a) lifts a
                                     # lacks the dividend signature - a one-
                                     # bar shift on 9 of 20 assets puts 43% of
                                     # cells at daily-vol scale with median
-                                    # 0.00bp, invisible to the median prong
+                                    # 0.00bp, invisible to the median prong.
+                                    # Below this share the per-asset prong
+                                    # still WARNs (MEDIUM) on any asset whose
+                                    # own median exceeds its per-cell
+                                    # tolerance without the dividend
+                                    # signature
 # Tick quantization: real close files are quantized to the $0.01 tick,
 # which puts rounding error in every cell of the derived return - per-cell
 # |diff| is bounded by ~tick*(1/p_t + 1/p_{t-1})/2 and the median of pure
@@ -278,6 +307,15 @@ PRICE_COVERAGE_MIN_CELLS_PER_ASSET = 20  # an asset counts as compared with
 # real income universes (BDC/mREIT ~10-12%); per bar that is 125bp at
 # ppy=12 and ~6bp at ppy=252.
 MAX_PLAUSIBLE_ANNUAL_DIV_YIELD = 0.15
+# Wording only: the one-sided waiver applies at every frequency, but the
+# PASS names its likely source by bar frequency. At or below this many bars
+# per year (weekly and coarser) the PASS keeps the coarse-bar dividend
+# wording (monthly payers on monthly bars put ~yield/12 in every cell); on
+# finer bars ordinary dividends touch only a few percent of cells, so an
+# offset in every bar is income accrued each bar (a total-return series
+# accruing dividends or interest daily against close-only prices), and the
+# PASS says so instead of calling daily bars coarse.
+DIVIDEND_COARSE_BAR_MAX_PPY = 52.0
 
 _CHECK_MISSING = "costs.missing_transaction_costs"
 _CHECK_DECLARATION = "costs.no_cost_declaration"
@@ -732,7 +770,7 @@ def _check_missing_transaction_costs(art: BacktestArtifacts,
                         "same pipeline run so net = gross - costs holds, then "
                         "re-audit; a net series that beats its own gross "
                         "reconstruction cannot be explained by transaction "
-                        "costs.",
+                        "costs. " + _CASH_COLUMN_REMEDIATION,
             details=details,
         )
 
@@ -854,6 +892,16 @@ def _check_missing_transaction_costs(art: BacktestArtifacts,
                     f"{DECLARED_IMPLIED_MISMATCH_FACTOR:g}x the declared "
                     f"{declared:g}bps - the cost model and the declaration "
                     f"disagree")
+        elif (declared > 0 and implied_bps > 0
+              and max(implied_bps / declared, declared / implied_bps)
+              >= DECLARED_IMPLIED_NOTE_FACTOR):
+            ratio = implied_bps / declared
+            note = (f"; note: the implied cost is {ratio:.2f}x the declared "
+                    f"{declared:g}bps (inside the "
+                    f"{DECLARED_IMPLIED_MISMATCH_FACTOR:g}x tolerance but off "
+                    f"by >= {DECLARED_IMPLIED_NOTE_FACTOR:g}x; a factor of 2 "
+                    f"is the one-way vs round-trip confusion), so check "
+                    f"which convention declared_costs_bps uses")
 
     # Per-date reconciliation: the mean-based implied cost is blind to
     # per-date structure - a flat per-bar deduction or a shifted-date
@@ -896,7 +944,8 @@ def _check_missing_transaction_costs(art: BacktestArtifacts,
                         "(net_t = gross_t - dollars_traded_t * cost_bps * "
                         "1e-4), or document the non-per-trade cost model "
                         "(financing schedule, sweep dates) so the per-date "
-                        "drag can be reconciled against it.",
+                        "drag can be reconciled against it. "
+                        + _CASH_COLUMN_REMEDIATION,
             details=details,
         )
 
@@ -1334,7 +1383,10 @@ def _check_price_return_consistency(art: BacktestArtifacts) -> CheckResult:
     discrepancy, plus a split-magnitude prong for the sparse-but-huge
     unadjusted-split case and a pervasiveness prong for mismatches
     confined to a minority of assets, which leave the pooled median clean
-    while daily-vol errors cover up to ~50% of cells (mixed-vendor feeds).
+    while daily-vol errors cover up to ~50% of cells (mixed-vendor feeds),
+    and a per-asset prong that judges each compared asset on its own
+    median, so a mismatch on one or a few names (a few percent of cells,
+    below the pervasive bar) is caught too.
     At coarse bar frequency the dividend mass per bar stops being sparse
     (monthly payers on monthly bars put ~yield/12 in every cell), so a
     median offset that carries the dividend signature - strictly one-sided
@@ -1437,7 +1489,8 @@ def _check_price_return_consistency(art: BacktestArtifacts) -> CheckResult:
     # |diff| <= ~(q_t/p_t + q_{t-1}/p_{t-1})/2.
     q_grid = _price_quantum_grid(px)
     q_prev = q_grid.shift(1)
-    bound = _pooled((q_grid / px + q_prev / p_prev) / 2.0)
+    bound_frame = (q_grid / px + q_prev / p_prev) / 2.0
+    bound = _pooled(bound_frame)
     quantized = bound.notna()
     n_quantized = int(quantized.sum())
     frac_quantized = n_quantized / n_cells if n_cells else 0.0
@@ -1496,6 +1549,34 @@ def _check_price_return_consistency(art: BacktestArtifacts) -> CheckResult:
         n_assets_total=n_assets_total,
         n_assets_compared=n_assets_compared,
     )
+    # Per-asset prong inputs (see PRICE_RETURN_PERVASIVE_FRAC): each
+    # compared asset's own median |diff| against its per-cell tolerance -
+    # the same threshold that defines `disc`, so tick-rounding cells never
+    # count - computed on every path so the details always carry the count.
+    # An asset off at its own median is a mismatch unless its discrepant
+    # cells carry the one-sided, per-bar-yield-bounded dividend signature
+    # (the coarse-bar heavy payer, off in every cell by design).
+    cell_tol = np.maximum(
+        PRICE_RETURN_POINT_TOL,
+        TICK_CELL_BOUND_MULT * np.nan_to_num(
+            bound_frame.to_numpy(dtype=float), nan=0.0))
+    ratio_med = pd.DataFrame(np.abs(disc_vals) / cell_tol).median(
+        axis=0, skipna=True).to_numpy(dtype=float)
+    off_median = ((per_asset_cmp.to_numpy()
+                   >= PRICE_COVERAGE_MIN_CELLS_PER_ASSET)
+                  & (ratio_med > 1.0))
+    mismatched: list[int] = []        # physical column positions
+    for j in np.flatnonzero(off_median):
+        col = disc_vals[:, j]
+        sub = col[np.isfinite(col) & (np.abs(col) > cell_tol[:, j])]
+        if not (float(np.quantile(sub, 0.90)) <= PRICE_RETURN_MEDIAN_TOL
+                and float(np.median(np.abs(sub))) <= div_cap):
+            mismatched.append(int(j))
+    n_assets_bad = int(off_median.sum())
+    details.update(n_assets_discrepant_median=n_assets_bad,
+                   n_assets_any_compared_cell=int(len(cols)),
+                   n_assets_mismatched=len(mismatched),
+                   mismatched_assets=[str(cols[j]) for j in mismatched])
 
     # Dividend signature at coarse bar frequency: a one-sided negative
     # offset (derived below declared) bounded by a plausible per-bar yield
@@ -1563,12 +1644,8 @@ def _check_price_return_consistency(art: BacktestArtifacts) -> CheckResult:
         sub_med_abs = float(sub.abs().median())
         subset_dividend_shaped = (sub_q90_signed <= PRICE_RETURN_MEDIAN_TOL
                                   and sub_med_abs <= div_cap)
-        per_asset_med = discrepancy.abs().median(axis=0, skipna=True)
-        n_assets_bad = int((per_asset_med > PRICE_RETURN_POINT_TOL).sum())
         details.update(discrepant_q90_signed=sub_q90_signed,
-                       discrepant_median_abs=sub_med_abs,
-                       n_assets_discrepant_median=n_assets_bad,
-                       n_assets_any_compared_cell=int(per_asset_med.size))
+                       discrepant_median_abs=sub_med_abs)
         if not subset_dividend_shaped:
             return warned(
                 cid,
@@ -1576,7 +1653,7 @@ def _check_price_return_consistency(art: BacktestArtifacts) -> CheckResult:
                 f"{frac_discrepant:.0%} of cells disagree by > "
                 f"{PRICE_RETURN_POINT_TOL * 1e4:.0f}bp (median |diff| "
                 f"{sub_med_abs * 1e4:.0f}bp on the discrepant cells, "
-                f"{n_assets_bad} of {per_asset_med.size} assets discrepant "
+                f"{n_assets_bad} of {len(cols)} assets discrepant "
                 f"at their own median) - a mismatch this widespread that "
                 f"lacks the one-sided sub-{div_cap * 1e4:.0f}bp/bar dividend "
                 f"signature is a prices-vs-returns mismatch confined to a "
@@ -1594,6 +1671,48 @@ def _check_price_return_consistency(art: BacktestArtifacts) -> CheckResult:
                             "assets is currently mis-sized.",
                 details=details,
             )
+    # Per-asset prong, independent of the pooled median and the pooled
+    # fraction: a one-bar shift, a wrong ticker mapping or another vendor's
+    # series on one or a few names leaves both pooled prongs clean (3% of
+    # cells per shifted name out of 30), yet each such name is off at its
+    # own median by daily-vol scale while honest names median at 0.
+    if mismatched:
+        mis_abs = np.abs(disc_vals[:, mismatched])
+        mis_med = float(np.median(mis_abs[np.isfinite(mis_abs)]))
+        names = ", ".join(str(cols[j]) for j in mismatched[:5])
+        if len(mismatched) > 5:
+            names += ", ..."
+        # the pooled prongs stayed silent either because the panel is clean
+        # or because they waived it as dividend-shaped (the coarse-bar
+        # heavy-payer layout, where nearly every cell is discrepant); the
+        # lead-in says which, so it never contradicts its own numbers
+        pooled_waived = ((med > PRICE_RETURN_MEDIAN_TOL and dividend_shaped)
+                         or frac_discrepant >= PRICE_RETURN_PERVASIVE_FRAC)
+        waived_txt = ("; waived as one-sided dividend income"
+                      if pooled_waived else "")
+        return warned(
+            cid,
+            f"the pooled prongs do not fire (median |diff| "
+            f"{med * 1e4:.2f}bp; {frac_discrepant:.1%} of cells off by > "
+            f"{PRICE_RETURN_POINT_TOL * 1e4:.0f}bp{waived_txt}) but "
+            f"{len(mismatched)} of {n_assets_compared} compared assets "
+            f"disagree at their own median ({names}; median |diff| "
+            f"{mis_med * 1e4:.0f}bp on their cells) without the one-sided "
+            f"sub-{div_cap * 1e4:.0f}bp/bar dividend signature - on those "
+            f"names prices and asset_returns do not describe the same "
+            f"series (a shifted close calendar, a different vendor's data, "
+            f"a wrong ticker mapping, or partial adjustment), which the "
+            f"pooled median and the {PRICE_RETURN_PERVASIVE_FRAC:.0%} "
+            f"pervasive-mismatch bar cannot see.{scope_txt}",
+            severity=Severity.MEDIUM,
+            remediation="Compare derived vs declared returns for the named "
+                        "assets (details list them under mismatched_assets) "
+                        "and rebuild those names from the same "
+                        "adjustment-consistent source; every dollar, "
+                        "commission, and share-count figure on those assets "
+                        "is currently mis-sized.",
+            details=details,
+        )
     # Fail-closed coverage gate: the defect
     # prongs above ran on whatever was covered - detection kept - but a
     # clean covered subset below the floor earns a scoped WARN, never the
@@ -1625,7 +1744,17 @@ def _check_price_return_consistency(art: BacktestArtifacts) -> CheckResult:
             details=details,
         )
     if med > PRICE_RETURN_MEDIAN_TOL and dividend_shaped:
-        # median prong waived by the dividend signature
+        # median prong waived by the dividend signature; the wording names
+        # the likely income source by bar frequency (see
+        # DIVIDEND_COARSE_BAR_MAX_PPY; the waiver itself is unchanged)
+        income_txt = (
+            "regular dividend income on close-only prices at coarse bar "
+            "frequency"
+            if float(art.periods_per_year) <= DIVIDEND_COARSE_BAR_MAX_PPY
+            else "income credited in every bar against close-only prices "
+                 "(e.g. a total-return series that accrues dividends or "
+                 "interest each bar; ordinary dividends are sparse at this "
+                 "bar frequency)")
         return passed(
             cid,
             f"returns derived from artifacts.prices sit a one-sided "
@@ -1633,8 +1762,7 @@ def _check_price_return_consistency(art: BacktestArtifacts) -> CheckResult:
             f"the signed diff <= {PRICE_RETURN_MEDIAN_TOL * 1e4:.0f}bp, "
             f"within the {div_cap * 1e4:.0f}bp/bar plausible dividend mass "
             f"at periods_per_year={art.periods_per_year:g}) over {n_cells} "
-            f"cells - consistent with regular dividend income on close-only "
-            f"prices at coarse bar frequency, not a data mismatch."
+            f"cells - consistent with {income_txt}, not a data mismatch."
             f"{scope_txt}",
             details=details,
         )
@@ -1663,10 +1791,10 @@ def _check_price_return_consistency(art: BacktestArtifacts) -> CheckResult:
     sparse_txt = (
         " (sparse, consistent with dividend/split adjustment points on "
         "close-only prices)" if frac_discrepant <= SPARSE_DIVIDEND_FRAC else
-        f" - above the {SPARSE_DIVIDEND_FRAC:.0%} sparse-dividend premise "
-        f"but below the {PRICE_RETURN_PERVASIVE_FRAC:.0%} pervasive-"
-        f"mismatch bar, or dividend-shaped; inspect the discrepant cells "
-        f"if this book's universe pays no dividends")
+        f" - above the {SPARSE_DIVIDEND_FRAC:.0%} sparse-dividend premise, "
+        f"but no compared asset is off at its own median without the "
+        f"dividend signature; inspect the discrepant cells if this book's "
+        f"universe pays no dividends")
     return passed(
         cid,
         f"returns derived from artifacts.prices match asset_returns: median "

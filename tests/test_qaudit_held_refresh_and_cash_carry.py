@@ -1,6 +1,7 @@
 """Held-refresh execution schedules and unreported cash carry.
 
-Position changes identify periodic refresh schedules despite occasional
+Position rebalances (a hold is either a repeated target or price-drifted
+actually-held weights) identify periodic refresh schedules despite occasional
 forced closes. Delay-based leakage evidence remains active. Per-date drag
 regression may identify bounded cash carry, but the result stays scoped
 until cash is supplied as an explicit asset.
@@ -11,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from qaudit import _stats
 from qaudit.checks import costs
 from qaudit.config import AuditConfig
 from qaudit.dynamic.probes_shift import (CHECK_DATE_SHIFT,
@@ -102,6 +104,57 @@ def held_book(seed=0, weekly_sampled=True, signal_func=composite_signal_func):
     return art, signal_func, backtest_func
 
 
+def drift_between_refreshes(target, rets):
+    """Actually-held recording of a target book: the engine trades to the
+    target only on bars where the target changes (the weekly refresh or a
+    delisting force-close) and otherwise lets the weights drift
+    self-financing with prices, so the recorded weights move on every
+    bar."""
+    tgt = target.fillna(0.0).to_numpy()
+    r = rets.reindex_like(target).fillna(0.0).to_numpy()
+    w = np.zeros_like(tgt)
+    for t in range(len(tgt)):
+        if t == 0 or np.any(np.abs(tgt[t] - tgt[t - 1]) > 1e-12):
+            w[t] = tgt[t]
+            continue
+        w[t] = (w[t - 1] * (1.0 + r[t - 1])
+                / (1.0 + float(w[t - 1] @ r[t - 1])))
+    return pd.DataFrame(w, index=target.index, columns=target.columns)
+
+
+def drifted_held_book(seed):
+    """The weekly held_book traded identically, but recorded as
+    actually-held (drifted) weights and costed on drift-aware traded
+    dollars."""
+    rets = simulate_market(n_assets=40, seed=seed)["returns"]
+    sig = composite_signal_func(rets)
+
+    def pos_from(signals, asset_returns):
+        lagged = signals.shift(1)
+        mask = np.zeros(len(lagged), dtype=bool)
+        mask[4::5] = True
+        held = lagged.where(pd.Series(mask, index=lagged.index),
+                            np.nan).ffill()
+        held = held.where(lagged.notna())     # delisting force-close
+        return drift_between_refreshes(rank_weights(held), asset_returns)
+
+    def net_drifted(pos, asset_returns):
+        gross = (pos * asset_returns.fillna(0.0)).sum(axis=1)
+        traded = _stats.traded_dollars_series(pos, asset_returns).fillna(0.0)
+        return gross - traded * (COST_BPS * 1e-4)
+
+    def backtest_func(signals, asset_returns):
+        return net_drifted(pos_from(signals, asset_returns), asset_returns)
+
+    pos = pos_from(sig, rets)
+    art = BacktestArtifacts(signals=sig, asset_returns=rets, positions=pos,
+                            strategy_returns=net_drifted(pos, rets),
+                            signal_input=rets, signal_lag=1,
+                            declared_costs_bps=COST_BPS,
+                            periods_per_year=PPY).aligned()
+    return art, backtest_func
+
+
 def date_shift(art, bf, sf=None, cfg=CFG):
     res = shift_run(art, cfg, signal_func=sf, backtest_func=bf)
     return {r.check: r for r in res}[CHECK_DATE_SHIFT]
@@ -170,7 +223,7 @@ def test_held_weekly_refresh_no_stamp_hedged_warn_not_critical():
     assert "embeds that bar's return" not in r.message
     sched = r.details["scheduled_activity"]
     assert sched["schedule_kind"] == "held_refresh"
-    assert sched["activity_source"] == "position changes"
+    assert sched["activity_source"] == "position rebalances (drift-aware)"
     assert sched["dominant_gap"] == 5
     assert sched["dominant_gap_share"] >= SCHED_REFRESH_DOMINANT_SHARE
     assert sched["active_frac"] <= 0.5
@@ -192,6 +245,32 @@ def test_held_weekly_refresh_mc_never_fails(seed):
     art, _, bf = held_book(seed=seed)
     r = date_shift(art, bf)
     assert r.status is not Status.FAIL, r.message
+
+
+@pytest.mark.parametrize("seed", [0, 3])
+def test_held_weekly_refresh_recorded_as_drifted_weights_never_fails(seed):
+    # The same weekly book recorded as actually-held weights: between
+    # refreshes the weights drift with prices, so they change on every bar
+    # and a raw position diff sees no cadence at all (both seeds used to
+    # lose the carve-out and draw FAIL CRITICAL). Drift is a hold, so the
+    # refresh grid must still be found and the verdict must be the scoped
+    # held_refresh WARN, exactly as for the target-weight recording.
+    art, bf = drifted_held_book(seed)
+    raw_change = art.positions.diff().abs().gt(1e-12).any(axis=1)
+    assert raw_change.mean() > 0.5         # raw diffs see trading everywhere
+    r = date_shift(art, bf)
+    assert r.status is Status.WARN, r.message
+    assert r.severity is Severity.HIGH
+    assert "REFRESHES them only on a strict schedule" in r.message
+    assert "embeds that bar's return" not in r.message
+    sched = r.details["scheduled_activity"]
+    assert sched["schedule_kind"] == "held_refresh"
+    assert sched["dominant_gap"] == 5
+    assert sched["active_frac"] <= 0.5
+    # the target-weight recording of the same book gets the same verdict
+    art_t, _, bf_t = held_book(seed=seed)
+    r_t = date_shift(art_t, bf_t)
+    assert (r_t.status, r_t.severity) == (r.status, r.severity)
 
 
 def test_same_composite_traded_daily_control_passes():
@@ -280,17 +359,18 @@ def test_refresh_detector_units():
     held_vals = 0.1 + 1e-3 * np.repeat(np.arange(100), 5)[:500]
     pos = pd.DataFrame({c: held_vals for c in "abcd"}, index=idx)
     pos.iloc[123:, 0] = 0.0    # off-schedule delisting close, held at zero
-    det = _refresh_grid_schedule(pos)
+    flat_rets = pos * 0.0      # no drift: a hold repeats the previous row
+    det = _refresh_grid_schedule(pos, flat_rets)
     assert det is not None and det["schedule_kind"] == "held_refresh"
     assert det["dominant_gap"] == 5
     daily = pd.DataFrame(np.random.default_rng(0).normal(size=(500, 4)),
                          index=idx, columns=list("abcd"))
-    assert _refresh_grid_schedule(daily) is None
+    assert _refresh_grid_schedule(daily, flat_rets) is None
     steps = np.cumsum(np.random.default_rng(1).integers(2, 9, 90))
     steps = steps[steps < 500]
     ragged_vals = 0.1 + 1e-3 * np.cumsum(np.isin(np.arange(500), steps))
     ragged = pd.DataFrame({c: ragged_vals for c in "abcd"}, index=idx)
-    assert _refresh_grid_schedule(ragged) is None   # no dominant cadence
+    assert _refresh_grid_schedule(ragged, flat_rets) is None   # no cadence
     sparse = pd.Series(False, index=idx)
     sparse.iloc[::5] = True
     sdet = _strict_gap_schedule(sparse, "positions")

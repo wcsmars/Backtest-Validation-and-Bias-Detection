@@ -6,6 +6,7 @@ Large finite values must neither crash a check nor erase usable evidence;
 exact-null construction has a bounded peak-memory budget.
 """
 import itertools
+import math
 import subprocess
 import sys
 import textwrap
@@ -17,11 +18,14 @@ import pytest
 from scipy.stats import poisson, spearmanr
 
 from qaudit.checks import leakage
+from qaudit._stats import cross_sectional_ic, forward_returns
 from qaudit.checks.leakage import (
     _OUTLIER_COUNT_ALPHA, _defactored_with_pcs, _distinct_key,
-    _exact_spearman_null, _exact_spearman_null_tied, _mc_spearman_null_tied,
-    _overlap_cluster_factor, _rank_multiset_key, _spearman_tail_ge,
-    _standardized_rowwise_corr, _tie_profile, _tied_two_sided_p, run)
+    _exact_spearman_null, _exact_spearman_null_tied, _exact_spearman_tail_dp,
+    _mc_spearman_null_tied, _overlap_cluster_factor, _perfect_rank_dates,
+    _perfect_tail_ge, _rank_multiset_key, _spearman_tail_ge,
+    _spearman_tail_ge_conservative, _standardized_rowwise_corr, _tie_profile,
+    _tied_two_sided_p, run)
 from qaudit.config import AuditConfig
 from qaudit.inputs import BacktestArtifacts
 from qaudit.types import Severity, Status
@@ -335,7 +339,7 @@ def test_true_leak_convicted_at_lowered_and_default_bar(bar):
 
 
 def test_perfect_expected_budgets_wide_books():
-    # The exact/t machinery must budget a real expectation at any breadth/bar
+    # The null-tail machinery must budget a real expectation at any breadth/bar
     # combination rather than a clipped lookup table.
     sig, rets = _noise_panel(21, n_names=20)
     r = _by_check(sig, rets, AuditConfig(leak_perfect_ic=0.55))[PERFECT]
@@ -365,6 +369,145 @@ def test_perfect_rank_tie_aware_at_lowered_bar():
     assert d["n_perfect"] / d["n_dates"] > CFG.leak_perfect_date_frac
 
 
+def _perfect_only(sig, rets, cfg):
+    """leakage.perfect_rank_dates alone, through run()'s own plumbing (on a
+    5000-date panel the outlier check's factor stage would dominate)."""
+    fwd = forward_returns(rets, 1)
+    ic = cross_sectional_ic(sig, fwd, method="spearman",
+                            min_names=leakage._MIN_NAMES).dropna()
+    joint = (sig.notna() & fwd.notna()).sum(axis=1)
+    return _perfect_rank_dates(ic, joint, cfg, _tie_profile(sig, fwd),
+                               signals=sig, horizon=1)
+
+
+# Exact count of the 11! permutations with sum d^2 <= 66, i.e. rho >= 0.70
+# at breadth 11 (cross-checked by a pruned brute-force enumeration).
+_EXACT_COUNT_11_AT_070 = 406_241
+
+
+def test_perfect_rank_deep_tail_budget_at_breadth_11():
+    # At breadth 11 the t-approximation reads P(|rho| >= 0.70) as 0.0165 per
+    # date against the exact 0.0204, so a 5000-date tie-free noise panel was
+    # budgeted 82.3 expected dates (bound 119.6) while noise averages 101.8:
+    # this seed draws 132, which that budget convicts as FAIL CRITICAL. The
+    # exact tail restores the budget (expected 101.75, bound 143.1).
+    sig, rets = _noise_panel(0, n_dates=5000, n_names=11)
+    r = _perfect_only(sig, rets, AuditConfig(leak_perfect_ic=0.70))
+    d = r.details
+    exact = 2.0 * _EXACT_COUNT_11_AT_070 / math.factorial(11)
+    assert d["expected_noise_dates"] == pytest.approx(
+        exact * d["n_dates"], abs=0.011)     # details round to 2 decimals
+    assert r.status is Status.PASS, r.message
+    # the t-approximation's budget is ~19% short, and this panel clears the
+    # bound built on it: the PASS above is the exact tail at work
+    t_exp = 2.0 * float(_spearman_tail_ge(11, 0.70)) * d["n_dates"]
+    assert t_exp < 0.85 * exact * d["n_dates"]
+    assert d["n_perfect"] > t_exp + 4.0 * np.sqrt(t_exp) + 1.0
+
+
+@pytest.mark.parametrize("n", range(5, 11))
+def test_subset_dp_null_matches_enumeration(n):
+    # The subset DP behind breadths 11-14 reproduces the n! enumeration
+    # wherever both exist.
+    vals, tail = _exact_spearman_tail_dp(n)
+    ev, et, _ = _exact_spearman_null(n)
+    np.testing.assert_allclose(vals, ev, rtol=0, atol=1e-12)
+    np.testing.assert_allclose(tail, et, rtol=1e-12, atol=0)
+
+
+@pytest.mark.parametrize("n", [11, 12, 13, 14])
+def test_conservative_tail_never_under_budgets_exact(n):
+    # The law used past the exact breadth, checked against the exact law
+    # where it exists: never materially below it at any atom (or between
+    # atoms) down to p = 1e-7, and within 3% in the bulk (p >= 1%).
+    vals, tail = _exact_spearman_tail_dp(n)
+    step = 12.0 / (n ** 3 - n)
+    worst_t = 1.0
+    for x, p in zip(vals, tail):
+        if x <= 0.2 or p < 1e-7:
+            continue
+        for bar in (float(x), float(x) - step / 4.0):
+            approx = _spearman_tail_ge_conservative(n, bar)
+            assert approx >= 0.995 * p, (n, bar, approx, p)
+            if p >= 1e-2:
+                assert approx <= 1.03 * p, (n, bar, approx, p)
+        worst_t = min(worst_t, float(_spearman_tail_ge(n, float(x))) / p)
+    assert worst_t < 0.6      # the t-approximation fails the same check
+
+
+def test_perfect_tail_dispatch():
+    # enumerated exact through breadth 10, subset-DP exact through 14, the
+    # conservative law beyond; never the t-approximation past breadth 10
+    assert _perfect_tail_ge(8, 0.70) == float(_spearman_tail_ge(8, 0.70))
+    assert _perfect_tail_ge(11, 0.70) == pytest.approx(
+        _EXACT_COUNT_11_AT_070 / math.factorial(11), rel=1e-12)
+    assert _perfect_tail_ge(15, 0.70) == _spearman_tail_ge_conservative(
+        15, 0.70)
+    assert _perfect_tail_ge(15, 0.70) > float(_spearman_tail_ge(15, 0.70))
+    assert _perfect_tail_ge(20, 1.5) == 0.0
+    assert _perfect_tail_ge(20, -1.0) == 1.0
+
+
+@pytest.mark.parametrize("n_names", [11, 16])
+def test_true_leak_convicted_at_lowered_bar_past_exact_breadth(n_names):
+    # Honest-power guard for the larger budget: signal = forward return +
+    # tiny noise still FAILs at breadths served by the DP and by the
+    # conservative law.
+    rng = np.random.default_rng(42)
+    idx = pd.bdate_range("2018-01-02", periods=500)
+    cols = [f"A{i}" for i in range(n_names)]
+    rets = pd.DataFrame(rng.normal(0, 0.01, size=(500, n_names)), idx, cols)
+    sig = (rets.shift(-1)
+           + rng.normal(0, 0.001, size=(500, n_names))).fillna(0.0)
+    r = _by_check(sig, rets, AuditConfig(leak_perfect_ic=0.70))[PERFECT]
+    assert r.status is Status.FAIL, r.message
+    assert r.severity is Severity.CRITICAL
+
+
+def test_tied_perfect_budget_reads_mc_upper_bound():
+    # Past breadth 10 a tied row's perfect-rank rate comes from one seeded
+    # MC draw per key pair: unbiased, but its sampling error is fixed for
+    # the panel (at breadth 12 and bar 0.90 the point estimate is 0.78x the
+    # exact tail). The budget reads a ~2-sigma upper bound instead. Checked
+    # on the tie-free lattice, where the exact tail exists at breadth
+    # 11-14: the bound never falls below it and costs at most 10% in the
+    # bulk.
+    lows = []
+    for n in (11, 12, 13, 14):
+        dk = _distinct_key(n)
+        for bar in np.arange(0.50, 0.91, 0.05):
+            exact = 2.0 * _perfect_tail_ge(n, float(bar))
+            point = float(_tied_two_sided_p(dk, dk, bar, bar)[0])
+            upper = float(_tied_two_sided_p(dk, dk, bar, bar,
+                                            mc_upper=True)[0])
+            assert exact <= upper, (n, bar, upper, exact)
+            assert point < upper
+            if exact >= 1e-2:
+                assert upper <= 1.10 * exact, (n, bar, upper, exact)
+            lows.append(point < 0.95 * exact)
+    assert any(lows)        # the point estimate alone under-budgets
+    # Wiring: a one-hot 12-name panel (tied signal, tie-free target) is
+    # budgeted the upper bound. Its analytic null is 2 of 12 atoms at
+    # |rho| = 0.480 >= 0.45, i.e. 1/6 per date.
+    cfg = AuditConfig(leak_perfect_ic=0.45)
+    key = tuple(sorted([12] * 11 + [24]))
+    sig, rets = _one_hot_panel(3, n_names=12)
+    r = _perfect_only(sig, rets, cfg)
+    d = r.details
+    upper = float(_tied_two_sided_p(key, _distinct_key(12), 0.45, 0.45,
+                                    mc_upper=True)[0])
+    assert d["expected_noise_dates"] == pytest.approx(
+        upper * d["n_dates"], abs=0.011)
+    assert d["expected_noise_dates"] > d["n_dates"] / 6.0
+    assert r.status is Status.PASS, r.message
+    # honest-power guard: the same tied geometry with a real leak (hot name
+    # = tomorrow's best return, so |rho| = 0.480 every date) still FAILs
+    sig, rets = _one_hot_panel(103, n_names=12, leak=True)
+    r = _perfect_only(sig, rets, cfg)
+    assert r.status is Status.FAIL, r.message
+    assert r.severity is Severity.CRITICAL
+
+
 def test_default_bar_noise_passes():
     # Pure noise stays clean at the default threshold.
     sig, rets = _noise_panel(3)
@@ -391,6 +534,25 @@ def test_no_runtime_warnings_on_huge_finite_panels(mag):
     finally:
         np.seterr(**old)
     assert set(res) == set(leakage.ALL_CHECKS)
+
+
+def test_conservative_tail_quiet_under_strict_numpy_on_wide_books():
+    # Past ~1,750 tie-free names the 0.90 bar lies beyond z ~ 37.6, where
+    # the Edgeworth term's exp(-z^2/2) underflows. Under strict NumPy error
+    # handling the perfect-rank rate must still come back finite in [0, 1],
+    # and the whole leakage module must still run.
+    old = np.seterr(all="raise")
+    try:
+        for n in (1800, 2000, 5000):
+            for bar in (0.70, 0.90, 0.99, 1.0):
+                p = _perfect_tail_ge(n, bar)
+                assert np.isfinite(p) and 0.0 <= p <= 1.0, (n, bar, p)
+        sig, rets = _noise_panel(5, n_dates=60, n_names=1800)
+        res = _by_check(sig, rets)
+    finally:
+        np.seterr(**old)
+    assert set(res) == set(leakage.ALL_CHECKS)
+    assert res[PERFECT].status is Status.PASS, res[PERFECT].message
 
 
 def test_corrupt_cells_do_not_nan_the_defactored_panel():

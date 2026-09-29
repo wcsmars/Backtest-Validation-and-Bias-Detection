@@ -7,10 +7,13 @@ dividend or isolated-tick differences.
 """
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from qaudit._stats import gross_strategy_returns, traded_dollars_series
 from qaudit.api import MODULE_CHECK_IDS
 from qaudit.checks import costs
 from qaudit.checks.costs import (MIN_PLAUSIBLE_ONE_WAY_BPS,
@@ -238,6 +241,67 @@ def test_honest_late_start_partial_overlap_passes(market, honest):
 
 # Declared-versus-implied cost tolerance.
 
+def _ls_collateral_book(rebal, *, cash_col=False, seed=7, n=1000, m=40):
+    """Dollar-neutral unit-gross L/S book charging exactly 10bps per dollar
+    traded and crediting 4%/yr interest on its cash balance (collateral plus
+    short proceeds = 1 - net exposure), drifted self-financingly between
+    rebalances. ``cash_col`` declares that interest as a CASH column."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2015-01-01", periods=n)
+    cols = [f"A{i:02d}" for i in range(m)]
+    rets = pd.DataFrame(rng.normal(0.0003, 0.015, (n, m)),
+                        index=dates, columns=cols)
+    sig = (rets.rolling(20).mean().shift(1).fillna(0.0)
+           + rng.normal(0.0, 1e-4, (n, m)))
+    w = np.zeros((n, m))
+    r_arr = rets.to_numpy()
+    for t in range(n):
+        if t % rebal == 0:
+            rank = sig.iloc[t].rank().to_numpy()
+            w[t, rank > m - m // 2] = 0.5 / (m // 2)
+            w[t, rank <= m // 2] = -0.5 / (m // 2)
+        else:
+            prev = w[t - 1]
+            w[t] = prev * (1.0 + r_arr[t - 1]) / (1.0 + prev @ r_arr[t - 1])
+    pos = pd.DataFrame(w, index=dates, columns=cols)
+    net_expo = pos.sum(axis=1)
+    net = (gross_strategy_returns(pos, rets)
+           - traded_dollars_series(pos, rets) * 10.0 * 1e-4
+           + (0.04 / 252) * (1.0 - net_expo))
+    if cash_col:
+        rets = rets.assign(CASH=0.04 / 252)
+        pos = pos.assign(CASH=1.0 - net_expo)
+        sig = sig.assign(CASH=np.nan)
+    art = BacktestArtifacts(signals=sig, asset_returns=rets, positions=pos,
+                            strategy_returns=net, declared_costs_bps=10.0,
+                            periods_per_year=252.0)
+    art.validate()
+    return _by(costs.run(art.aligned(), CFG))[C1]
+
+
+@pytest.mark.parametrize("rebal,severity", [(5, Severity.HIGH),
+                                            (1, Severity.MEDIUM)])
+def test_long_short_collateral_interest_remediation_names_cash_column(
+        rebal, severity):
+    # The cash-carry waiver deliberately bounds carry by 1 - gross exposure
+    # (none on a unit-gross L/S book), so an honest book crediting interest
+    # on collateral keeps the negative-implied-cost (weekly) or
+    # not-per-trade (daily) WARN. The remediation must name the route that
+    # reconciles it: declare the interest as a CASH column with position
+    # 1 - net exposure.
+    r = _ls_collateral_book(rebal)
+    assert r.status is Status.WARN, r.message
+    assert r.severity is severity
+    assert "cash_carry_fit" not in r.details
+    assert "collateral" in r.remediation
+    assert "CASH column" in r.remediation
+    assert "1 - net exposure" in r.remediation
+    # ...and following it does reconcile the same book at the declared cost
+    fixed = _ls_collateral_book(rebal, cash_col=True)
+    assert fixed.status is Status.PASS, fixed.message
+    assert fixed.details["implied_bps"] == pytest.approx(10.0, abs=0.5)
+
+
 def test_undercharged_beyond_factor_still_warns_medium(market, honest):
     # detection-power guard: charging 2bp while declaring 30bp keeps the
     # under-charged WARN (implied is above the floor, so no escalation)
@@ -260,6 +324,35 @@ def test_within_factor_window_passes_by_design(market, honest):
                 declared_costs_bps=10.0)
     r = _by(costs.run(art, CFG))[C1]
     assert r.status is Status.PASS
+
+
+@pytest.mark.parametrize("charged,declared,noted", [
+    (10.0, 20.0, True),     # round-trip declared, one-way charged
+    (20.0, 10.0, True),     # one-way declared, round-trip charged
+    (25.0, 10.0, True),     # 2.5x: inside the 3x tolerance, still named
+    (29.6, 10.0, True),     # just under 3x: the ratio must not print as 3x
+    (10.0, 10.0, False),    # honest: no note
+    (12.0, 10.0, False),    # within 2x: no note
+])
+def test_factor_two_declaration_mismatch_noted_in_pass(market, honest, charged,
+                                                       declared, noted):
+    # informational only: the status stays PASS inside the 3x tolerance,
+    # but a >= 2x declared-vs-implied gap (one-way vs round-trip) is named
+    pos = positions_from_signals(honest, 1)
+    art = _arts(market, honest, pos,
+                strategy_returns=net_returns(pos, market["returns"], charged),
+                declared_costs_bps=declared)
+    r = _by(costs.run(art, CFG))[C1]
+    assert r.status is Status.PASS, r.message
+    assert ("round-trip" in r.message) is noted
+    if noted:
+        # the printed ratio carries two decimals, so a gap just inside the
+        # 3x tolerance never reads as "3x ... inside the 3x tolerance"
+        m = re.search(r"implied cost is (\d+\.\d\d)x the declared",
+                      r.message)
+        assert m is not None, r.message
+        assert float(m.group(1)) == pytest.approx(
+            r.details["implied_bps"] / declared, abs=0.006)
 
 
 def test_declared_never_deducted_escalates_past_undercharged(market, honest):

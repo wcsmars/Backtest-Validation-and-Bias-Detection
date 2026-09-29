@@ -1,7 +1,9 @@
 """Audit report: aggregation, rendering, and gating."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from .errors import AuditFailure, InputValidationError
@@ -37,8 +39,9 @@ def _is_diagnostic(check_id: str) -> bool:
 
 
 def _flag(r: CheckResult, name: str) -> bool:
-    """True iff ``r.details[name]`` is set and truthy."""
-    return bool(r.details.get(name, False))
+    """True iff ``r.details[name]`` is set and truthy (False when a
+    malformed result carries non-dict ``details``)."""
+    return isinstance(r.details, dict) and bool(r.details.get(name, False))
 
 
 def _result_contract_problem(r: CheckResult) -> str | None:
@@ -71,6 +74,23 @@ def _result_contract_problem(r: CheckResult) -> str | None:
             return (f"details[{flag_name!r}] must be an actual bool, got "
                     f"{type(r.details[flag_name]).__name__}")
     return None
+
+
+# Rendering marker for a status/severity that is not a genuine enum member
+# (a result mutated after construction). It deliberately matches no verdict
+# word, so a malformed ``status = "fail"`` cannot render as a real FAIL.
+_INVALID = "invalid"
+
+
+def _enum_text(value: Any, enum: type[Enum]) -> str:
+    """``value.value`` for a genuine ``enum`` member, else ``_INVALID``."""
+    return str(value.value) if isinstance(value, enum) else _INVALID
+
+
+def _severity_sort_key(r: CheckResult) -> int:
+    """Descending-severity sort key; a malformed severity sorts first."""
+    sev = r.severity
+    return -(sev.rank if isinstance(sev, Severity) else 99)
 
 
 def _expected_check_ids(meta: dict[str, Any]) -> list[str]:
@@ -205,8 +225,6 @@ def _json_clean(v: Any, *, _stack: set[int] | None = None,
             if len(set(bases)) == len(bases):
                 return {base: value for base, _, _, value in cleaned}
             # Stringification can collide (1 and "1", None and "None").
-            import json
-
             entries = [
                 {"key_type": key_type, "key": key, "value": value}
                 for _, key_type, key, value in cleaned
@@ -217,8 +235,6 @@ def _json_clean(v: Any, *, _stack: set[int] | None = None,
             return {"__qaudit_typed_mapping_v1__": entries}
         if isinstance(v, (set, frozenset)):
             # Hash-randomized iteration order must not move config_hash.
-            import json
-
             cleaned = [clean(x) for x in v]
             return sorted(cleaned, key=lambda x: json.dumps(
                 x, sort_keys=True, separators=(",", ":"), allow_nan=False))
@@ -259,7 +275,6 @@ def _provenance_problem(provenance: Any,
                         meta: dict[str, Any]) -> str | None:
     """Validate the minimum self-consistent deployment provenance record."""
     import hashlib
-    import json
     import math
 
     def _finite_json_number(value: Any) -> bool:
@@ -823,9 +838,29 @@ class AuditReport:
         return msg
 
     # -- rendering -----------------------------------------------------------
+    def _render_order(self) -> list[CheckResult]:
+        """Results in display order: status groups (FAIL first), by
+        descending severity inside a group. A result whose status is
+        not a ``Status`` (mutated after construction) belongs to no
+        group; list it first so it cannot drop out of the rendering."""
+        ordered = [r for r in self.results
+                   if not isinstance(r.status, Status)]
+        for status in _STATUS_ORDER:
+            ordered += sorted(self.by_status(status),
+                              key=_severity_sort_key)
+        return ordered
+
     def summary(self) -> str:
-        counts = {s: len(self.by_status(s)) for s in _STATUS_ORDER}
+        # A structurally invalid result (mutated after construction) is
+        # counted once, as INVALID, never inside a verdict group, so the
+        # parts always add up to the number of checks.
+        valid = [r for r in self.results
+                 if _result_contract_problem(r) is None]
+        counts = {s: sum(r.status is s for r in valid) for s in _STATUS_ORDER}
         parts = [f"{n} {s.value.upper()}" for s, n in counts.items() if n]
+        n_invalid = len(self.results) - len(valid)
+        if n_invalid:
+            parts.append(f"{n_invalid} {_INVALID.upper()}")
         verdict = "CLEAN" if self.ok else "SUSPECT"
         s = (f"qaudit: {verdict} - {len(self.results)} checks "
              f"({', '.join(parts) if parts else 'none run'})")
@@ -844,28 +879,44 @@ class AuditReport:
             n_a = self.meta.get("n_assets")
             if n_p is not None:
                 lines.append(f"  sample: {n_p} periods x {n_a} assets")
-        for status in _STATUS_ORDER:
-            group = sorted(self.by_status(status),
-                           key=lambda r: -r.severity.rank)
-            for r in group:
-                lines.append("  " + str(r).replace("\n", "\n  "))
+        for r in self._render_order():
+            problem = _result_contract_problem(r)
+            text = (str(r) if problem is None else
+                    f"[{_INVALID.upper()}] {r.check} - structurally "
+                    f"invalid result ({problem}): {r.message}")
+            lines.append("  " + text.replace("\n", "\n  "))
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
         """Report as plain data, guaranteed ``json.dumps``-compatible (even
         with ``allow_nan=False``); see :func:`_json_clean` for the value
         coercions."""
+        results = []
+        for r in self.results:
+            # A malformed result (mutated after construction) still
+            # serializes: its status (and a non-enum severity) becomes the
+            # explicit "invalid" marker, as in the text renderers, and the
+            # contract problem rides along.
+            problem = _result_contract_problem(r)
+            entry = {"check": r.check if isinstance(r.check, str)
+                     else str(r.check),
+                     "status": (_INVALID if problem is not None
+                                else _enum_text(r.status, Status)),
+                     "severity": _enum_text(r.severity, Severity),
+                     "message": r.message if isinstance(r.message, str)
+                     else str(r.message),
+                     "remediation": (r.remediation
+                                     if isinstance(r.remediation, str)
+                                     else str(r.remediation)),
+                     "details": _json_clean(r.details)}
+            if problem is not None:
+                entry["contract_problem"] = problem
+            results.append(entry)
         return {
             "summary": self.summary(),
             "ok": self.ok,
             "meta": _json_clean(self.meta),
-            "results": [
-                {"check": r.check, "status": r.status.value,
-                 "severity": r.severity.value, "message": r.message,
-                 "remediation": r.remediation,
-                 "details": _json_clean(r.details)}
-                for r in self.results
-            ],
+            "results": results,
         }
 
     def to_html(self, *, title: str = "Backtest validation report") -> str:
@@ -922,22 +973,27 @@ class AuditReport:
                  "", self.summary(), ""]
         lines += ["| status | severity | check | finding |",
                   "|---|---|---|---|"]
-        for status in _STATUS_ORDER:
-            for r in sorted(self.by_status(status), key=lambda r: -r.severity.rank):
-                # newlines end a markdown table row mid-cell (ERROR messages
-                # embed exception text verbatim, often multiline for pandas
-                # errors); sanitize at this sink only - __str__ indents
-                # multiline messages and to_dict keeps the raw string
-                msg = safe_text(r.message)
+        for r in self._render_order():
+            # newlines end a markdown table row mid-cell (ERROR messages
+            # embed exception text verbatim, often multiline for pandas
+            # errors); sanitize at this sink only - __str__ indents
+            # multiline messages and to_dict keeps the raw string
+            msg = safe_text(str(r.message))
+            problem = _result_contract_problem(r)
+            if problem is not None:
+                word = _INVALID.upper()
+                msg = safe_text(f"structurally invalid result "
+                                f"({problem}): {r.message}")
+            else:
                 word = r.status.value.upper()
                 if r.status is Status.PASS:
                     if _flag(r, _FLAG_UNRESOLVED):
                         word += " (unresolved)"
                     if _flag(r, _FLAG_NOT_JUDGED):
                         word += " (not judged)"
-                check = safe_check(r.check)
-                lines.append(f"| {word} | {r.severity.value} "
-                             f"| `{check}` | {msg} |")
+            check = safe_check(str(r.check))
+            lines.append(f"| {word} | {_enum_text(r.severity, Severity)} "
+                         f"| `{check}` | {msg} |")
         # ERROR included for parity with CheckResult.__str__: the synthetic
         # audit.filter_matched_nothing ERROR is the only remediation-carrying
         # ERROR and its fix (the valid family prefixes) must be visible here
@@ -947,7 +1003,7 @@ class AuditReport:
         if rem:
             lines += ["", "## Remediation", ""]
             for r in rem:
-                fix = safe_text(r.remediation)
-                check = safe_check(r.check)
+                fix = safe_text(str(r.remediation))
+                check = safe_check(str(r.check))
                 lines.append(f"- **`{check}`** - {fix}")
         return "\n".join(lines)

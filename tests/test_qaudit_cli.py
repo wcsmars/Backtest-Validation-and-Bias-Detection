@@ -102,7 +102,7 @@ def test_blocked_audit_exports_failed_evidence(tmp_path, monkeypatch, result):
     output = tmp_path / "report.json"
     assert main(["--signals", str(path), "--asset-returns", str(path),
                  "--output", str(output)]) == 1
-    assert json.loads(output.read_text()) == report.to_dict()
+    assert json.loads(output.read_text(encoding="utf-8")) == report.to_dict()
 
 
 def test_required_skipped_family_cannot_pass_cli(tmp_path, monkeypatch, capsys):
@@ -141,7 +141,7 @@ def test_existing_output_is_never_overwritten(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("qaudit.cli.audit", unexpected)
     assert main(["--signals", "missing.csv", "--asset-returns", "missing.csv",
                  "--output", str(output)]) == 2
-    assert output.read_text() == "preserve"
+    assert output.read_text(encoding="utf-8") == "preserve"
     assert "Output already exists" in capsys.readouterr().err
 
 
@@ -160,7 +160,37 @@ def test_python_module_entrypoint_help():
     source = str(Path(__file__).resolve().parents[1] / "src")
     env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run([sys.executable, "-m", "qaudit", "--help"],
-                            capture_output=True, text=True, check=False, env=env)
+                            capture_output=True, text=True, encoding="utf-8", check=False, env=env)
     assert result.returncode == 0
     assert "--signals" in result.stdout
     assert "--asset-returns" in result.stdout
+
+
+def test_entry_point_survives_a_console_that_cannot_encode_report_text(tmp_path):
+    # A console whose codec lacks a character in a check message (an ASCII
+    # or Latin-1 locale, errors="strict") must not crash the entry point
+    # part-way through the summary: the character is backslash-escaped.
+    path = write_csv(tmp_path, "date,A\n2024-01-01,0.01\n")
+    env = os.environ.copy()
+    source = str(Path(__file__).resolve().parents[1] / "src")
+    env["PYTHONPATH"] = source + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHONIOENCODING"] = "ascii"
+    helped = subprocess.run([sys.executable, "-m", "qaudit", "--help"],
+                            capture_output=True, text=True, check=False, env=env)
+    assert helped.returncode == 0, helped.stderr
+    code = ("import sys\n"
+            "import qaudit.cli as cli\n"
+            "from qaudit import AuditReport, Severity\n"
+            "from qaudit.types import passed, warned\n"
+            "cli.audit = lambda *args: AuditReport([\n"
+            "    passed('lookahead.test', 'ok'),\n"
+            "    warned('costs.test', 'mark \\u2026 here', severity=Severity.LOW)])\n"
+            f"sys.argv = ['qaudit', '--signals', {str(path)!r}, "
+            f"'--asset-returns', {str(path)!r}, "
+            f"'--output', {str(tmp_path / 'report.json')!r}]\n"
+            "cli.cli()\n")
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                            text=True, check=False, env=env)
+    assert result.returncode == 0, result.stderr
+    assert "Traceback" not in result.stderr
+    assert "Review costs.test: mark \\u2026 here" in result.stdout

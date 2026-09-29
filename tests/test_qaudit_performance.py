@@ -259,11 +259,11 @@ def test_ic_stability_not_judged_when_sample_too_short(tiny_results):
 # 5. performance.ic_regime_concentration
 # ---------------------------------------------------------------------------
 
-def _regime_artifacts(seed=4, n=1040, m=30):
+def _regime_artifacts(seed=4, n=1040, m=30, start="2018-01-02"):
     """Pure noise signal except during 2020, where it embeds the forward
     return - all the IC comes from one calendar year."""
     rng = np.random.default_rng(seed)
-    dates = pd.bdate_range("2018-01-02", periods=n)
+    dates = pd.bdate_range(start, periods=n)
     cols = [f"R{i:02d}" for i in range(m)]
     rets = pd.DataFrame(rng.normal(0.0, 0.01, (n, m)), index=dates, columns=cols)
     fwd = rets.shift(-1)
@@ -282,6 +282,95 @@ def test_ic_regime_concentration_warns_on_one_year_edge():
     assert "2020" in r.message and "%" in r.message
     assert isinstance(r.details["yearly"], dict) and len(r.details["yearly"]) >= 3
     assert r.remediation
+
+
+def _stationary_ic_artifacts(start, n, seed=0, m=50):
+    """Same-strength edge on every date (signal = 0.1 x forward return +
+    noise): any regime WARN is a false positive by construction."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range(start, periods=n)
+    cols = [f"R{i:02d}" for i in range(m)]
+    rets = pd.DataFrame(rng.normal(0.0, 0.01, (n, m)), index=dates, columns=cols)
+    fwd = rets.shift(-1)
+    signals = (0.1 * fwd.fillna(0.0)
+               + pd.DataFrame(rng.normal(0.0, 0.02, (n, m)), index=dates,
+                              columns=cols))
+    return BacktestArtifacts(signals=signals, asset_returns=rets).aligned()
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_ic_regime_stub_years_do_not_manufacture_a_regime(seed):
+    """Nov 2019 to Feb 2021 (330 bars) touches three calendar years but only
+    2020 is full: summed IC would give 2020 75-86% of the total (seeds
+    0-2) from date coverage alone. Per-year means with stub years excluded
+    leave one comparable year, so the check is not judged, and says why."""
+    r = by_id(run(_stationary_ic_artifacts("2019-11-01", 330, seed),
+                  AuditConfig()))["performance.ic_regime_concentration"]
+    assert r.status is Status.PASS
+    assert r.details["not_judged"] is True
+    assert r.details["excluded_years"] == [2019, 2021]
+    assert r.details["n_calendar_years"] == 3 and r.details["n_years"] == 1
+    assert r.details["yearly_dates"][2020] > r.details["min_year_dates"] == 63
+    assert "stub year" in r.message
+    assert "no edge detectable" not in r.message  # the edge is above the floor
+
+
+def test_ic_regime_stationary_edge_with_stub_ends_is_spread():
+    """Long book with a stub first year: the remaining full years are
+    judged on per-year means and the stationary edge reads as spread."""
+    r = by_id(run(_stationary_ic_artifacts("2019-11-01", 800),
+                  AuditConfig()))["performance.ic_regime_concentration"]
+    assert r.status is Status.PASS
+    assert "not_judged" not in r.details
+    assert r.details["excluded_years"] == [2019]
+    assert r.details["share"] <= AuditConfig().ic_regime_share_warn
+
+
+def test_ic_regime_detection_survives_stub_years():
+    """Detection power: a 2020-only edge in a book with stub years at both
+    ends (Nov 2017 to Jan 2022) still WARNs on 2020."""
+    art = _regime_artifacts(n=1100, start="2017-11-01")
+    r = by_id(run(art, AuditConfig()))["performance.ic_regime_concentration"]
+    assert r.status is Status.WARN
+    assert r.details["excluded_years"] == [2017, 2022]
+    assert r.details["n_years"] == 4
+    assert r.details["top_year"] == 2020
+    assert r.details["share"] > AuditConfig().ic_regime_share_warn
+    assert "stub year" in r.message
+
+def _warmup_edge_artifacts(seed, warmup_start="2012-01-02",
+                           start="2019-12-06", n=546, m=30):
+    """Stationary weak edge (signal = 0.06 x forward return + noise) from Dec
+    2019 to Jan 2022 (18 IC dates in 2019, 4 in 2022), preceded by years of
+    empty (NaN) signals: the warm-up must not dilute the stub threshold."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range(start, periods=n)
+    cols = [f"R{i:02d}" for i in range(m)]
+    rets = pd.DataFrame(rng.normal(0.0, 0.01, (n, m)), index=dates, columns=cols)
+    signals = (0.06 * rets.shift(-1).fillna(0.0)
+               + pd.DataFrame(rng.normal(0.0, 0.02, (n, m)), index=dates,
+                              columns=cols))
+    full = pd.bdate_range(warmup_start, dates[-1])
+    pre = full[full < dates[0]]
+    warm = np.random.default_rng([seed, 1])
+    rets = pd.concat([pd.DataFrame(warm.normal(0.0, 0.01, (len(pre), m)),
+                                   index=pre, columns=cols), rets])
+    return BacktestArtifacts(signals=signals.reindex(full),
+                             asset_returns=rets).aligned()
+
+
+@pytest.mark.parametrize("seed", [0, 2, 7])
+def test_ic_regime_empty_warmup_does_not_lower_the_stub_threshold(seed):
+    """The stub threshold scales with the IC density between the first and
+    last usable IC date, not over the whole grid. Measured over the grid,
+    seven empty warm-up years cut it from 63 to 14 dates, so the 18-date
+    2019 stub was judged and these seeds warned on a stationary edge."""
+    r = by_id(run(_warmup_edge_artifacts(seed),
+                  AuditConfig()))["performance.ic_regime_concentration"]
+    assert r.status is Status.PASS
+    assert r.details["min_year_dates"] == 63
+    assert r.details["excluded_years"] == [2019, 2022]
+    assert r.details["not_judged"] is True
 
 
 def test_ic_regime_concentration_passes_on_clean(clean_results):

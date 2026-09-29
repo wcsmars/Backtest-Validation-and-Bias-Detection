@@ -205,10 +205,12 @@ def test_negative_h_period_leak_still_two_sided():
 # 3. suspicious_sharpe: cost-drag discriminator on the negative branches
 # ---------------------------------------------------------------------------
 
-def _churny_costed_book(seed, costs_bps=25.0, n_assets=100, n_days=756):
+def _churny_costed_book(seed, costs_bps=25.0, n_assets=100, n_days=756,
+                        declared_bps="charged"):
     """Honest no-edge fast-reversal candidate: 100 diversified names, 1-bar
-    lag, ~46%/period one-sided turnover, costs charged and declared. Net SR
-    ~ -16 purely from deterministic drag; gross ~ 0."""
+    lag, ~46%/period one-sided turnover, costs charged and declared (unless
+    ``declared_bps`` overrides the declaration). Net SR ~ -16 purely from
+    deterministic drag; gross ~ 0."""
     rng = np.random.default_rng(seed)
     dates = pd.bdate_range("2020-01-02", periods=n_days)
     cols = [f"A{i:03d}" for i in range(n_assets)]
@@ -216,9 +218,10 @@ def _churny_costed_book(seed, costs_bps=25.0, n_assets=100, n_days=756):
                         index=dates, columns=cols)
     sig = -momentum_signal(rets, window=2)
     pos = positions_from_signals(sig, 1)
+    declared = costs_bps if declared_bps == "charged" else declared_bps
     return BacktestArtifacts(signals=sig, asset_returns=rets, positions=pos,
                              strategy_returns=net_returns(pos, rets, costs_bps),
-                             signal_lag=1, declared_costs_bps=costs_bps
+                             signal_lag=1, declared_costs_bps=declared
                              ).aligned()
 
 
@@ -245,7 +248,62 @@ def test_honest_costed_churny_book_warn_range_also_explained():
     assert r.details["implied_one_way_bps"] == pytest.approx(10.0, abs=0.5)
 
 
-def _sign_flip_leak_book(seed):
+@pytest.mark.parametrize("charged,declared", [(25.0, 50.0), (25.0, 12.5),
+                                              (10.0, 20.0), (7.0, 14.0)],
+                         ids=["declared-2x", "declared-half", "10bp-2x",
+                              "warn-band-2x"])
+def test_misdeclared_cost_still_explained_as_cost_drag(charged, declared):
+    """FP guard: an honest churny book whose declaration misstates the
+    charged cost (one-way vs round-trip is a factor of 2) is still cost drag.
+    The declared cost does not reconcile, the implied cost does (the same
+    test the no-declaration path already applies), and the PASS names the
+    misstatement instead of diagnosing a sign-flipped leak. 7bp puts the
+    net SR (~ -4.2) in the WARN band, 10bp and above in the FAIL band."""
+    art = _churny_costed_book(500, costs_bps=charged, declared_bps=declared)
+    r = _by(run(art, CFG))["performance.suspicious_sharpe"]
+    assert r.status is Status.PASS
+    assert r.details["sharpe_annualized"] < -CFG.sharpe_warn
+    assert r.details["implied_one_way_bps"] == pytest.approx(charged, abs=0.5)
+    assert r.details["declared_costs_bps"] == declared
+    assert r.details["declared_cost_reconciled"] is False
+    assert "cost drag" in r.message
+    assert "misstated by 2.0x (one-way vs round-trip?)" in r.message
+    assert "costs.missing_transaction_costs" in r.message
+
+
+def test_correctly_declared_cost_reconciles_on_the_declaration():
+    r = _by(run(_churny_costed_book(500), CFG))["performance.suspicious_sharpe"]
+    assert r.status is Status.PASS
+    assert r.details["declared_costs_bps"] == 25.0
+    assert r.details["declared_cost_reconciled"] is True
+    assert "misstated" not in r.message
+
+
+def test_large_cost_misstatement_is_named_without_the_round_trip_hint():
+    """A 10x misstatement cannot come from a one-way vs round-trip mix-up,
+    so the PASS names the ratio without that hint."""
+    art = _churny_costed_book(500, costs_bps=25.0, declared_bps=250.0)
+    r = _by(run(art, CFG))["performance.suspicious_sharpe"]
+    assert r.status is Status.PASS
+    assert r.details["declared_cost_reconciled"] is False
+    assert "misstated by 10.0x: see costs.missing_transaction_costs" in r.message
+    assert "round-trip" not in r.message
+
+
+def test_declared_zero_cost_is_recorded_and_named():
+    """An explicit zero declaration is recorded as 0, not as no declaration,
+    and the PASS says the declaration omits the charged cost."""
+    art = _churny_costed_book(500, costs_bps=25.0, declared_bps=0.0)
+    r = _by(run(art, CFG))["performance.suspicious_sharpe"]
+    assert r.status is Status.PASS
+    assert r.details["declared_costs_bps"] == 0.0
+    assert r.details["declared_cost_reconciled"] is False
+    assert r.details["implied_one_way_bps"] == pytest.approx(25.0, abs=0.5)
+    assert "declaration of zero cost omits it" in r.message
+    assert "costs.missing_transaction_costs" in r.message
+
+
+def _sign_flip_leak_book(seed, declared_bps=10.0):
     mkt = simulate_market(seed=seed)
     rets = mkt["returns"]
     honest = momentum_signal(rets)
@@ -255,14 +313,17 @@ def _sign_flip_leak_book(seed):
     pos = positions_from_signals(sig, 1)
     return BacktestArtifacts(signals=sig, asset_returns=rets, positions=pos,
                              strategy_returns=net_returns(pos, rets, 10.0),
-                             signal_lag=1, declared_costs_bps=10.0).aligned()
+                             signal_lag=1,
+                             declared_costs_bps=declared_bps).aligned()
 
 
-def test_sign_flipped_leak_with_costs_still_fails_with_sign_diagnosis():
+@pytest.mark.parametrize("declared", [10.0, 20.0], ids=["declared", "misdeclared"])
+def test_sign_flipped_leak_with_costs_still_fails_with_sign_diagnosis(declared):
     """Attack / detection power: the sign-flipped leak charges the
     same 10bp costs (its drag reconciles!) but gross SR ~ -80 is itself far
-    beyond the warn bar - the gross gate keeps the FAIL and its diagnosis."""
-    r = _by(run(_sign_flip_leak_book(2), CFG))["performance.suspicious_sharpe"]
+    beyond the warn bar - the gross gate keeps the FAIL and its diagnosis,
+    whether the drag reconciles on the declaration or on the implied cost."""
+    r = _by(run(_sign_flip_leak_book(2, declared), CFG))["performance.suspicious_sharpe"]
     assert r.status is Status.FAIL
     assert r.severity is Severity.HIGH
     assert r.details["sharpe_annualized"] < -CFG.sharpe_fail
@@ -270,10 +331,12 @@ def test_sign_flipped_leak_with_costs_still_fails_with_sign_diagnosis():
     assert "sign-flip" in r.message or "inverted" in r.message
 
 
-def test_net_unrelated_to_positions_does_not_reconcile():
+@pytest.mark.parametrize("declared", [10.0, None], ids=["declared", "undeclared"])
+def test_net_unrelated_to_positions_does_not_reconcile(declared):
     """Honest guard on the reconciliation gate: an extreme-negative net
     series unrelated to the positions (gross ~ honest momentum) must stay
-    FAIL - (gross - net) does not track dollars traded x declared costs."""
+    FAIL - (gross - net) tracks dollars traded x neither the declared nor
+    the implied cost."""
     mkt = simulate_market(seed=2)
     rets = mkt["returns"]
     honest = momentum_signal(rets)
@@ -282,7 +345,7 @@ def test_net_unrelated_to_positions_does_not_reconcile():
     strat = pd.Series(rng.normal(-0.0040, 0.010, len(rets)), index=rets.index)
     art = BacktestArtifacts(signals=honest, asset_returns=rets, positions=pos,
                             strategy_returns=strat, signal_lag=1,
-                            declared_costs_bps=10.0).aligned()
+                            declared_costs_bps=declared).aligned()
     r = _by(run(art, CFG))["performance.suspicious_sharpe"]
     assert r.status is Status.FAIL
     assert abs(r.details["gross_sharpe_annualized"]) < CFG.sharpe_warn

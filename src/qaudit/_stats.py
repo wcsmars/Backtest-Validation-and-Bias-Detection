@@ -373,6 +373,52 @@ def drifted_weights(positions: pd.DataFrame,
     return w
 
 
+# Tolerances for telling a rebalance from a hold. The absolute slack absorbs
+# NAV-renormalization round-off in engines that record actually-held
+# weights (~1e-12..1e-10); the relative slack absorbs a per-bar fee or
+# borrow accrual in the NAV denominator (~1e-4). A genuine rebalance moves
+# weights by bps of NAV, orders of magnitude above both.
+REBALANCE_ABS_TOL = 1e-9
+REBALANCE_REL_TOL = 1e-3
+
+
+def rebalance_rows(positions: pd.DataFrame,
+                   asset_returns: pd.DataFrame) -> np.ndarray:
+    """Boolean mask, one entry per row of ``positions``: True on bars where
+    the book re-decides its weights, False on bars where it only holds.
+
+    Engines record a held book in one of two ways: the constant target
+    (``w[t] == w[t-1]``) or the actually-held weights that drift with
+    prices (``w[t] == w_drift[t]``, see :func:`drifted_weights`). A bar is
+    a hold under either encoding, so a rebalance is a bar whose weights
+    differ materially from BOTH the previous row and the drifted
+    reference. Differing from only one is a hold in the other encoding: a
+    repeated target differs from drift whenever returns disperse, and
+    drifted weights differ from the previous row on every bar.
+
+    This identifies decision dates (when the signal is sampled), not
+    dollars traded; restoring a constant target trades real dollars, which
+    :func:`traded_dollars_series` prices. Row 0 is True when the first
+    row holds any position (the entry). Rows where the drifted reference is
+    undefined (NAV growth <= 0) fall back to the raw row change alone.
+    """
+    pos = positions.fillna(0.0).to_numpy(dtype=float)
+    n = pos.shape[0]
+    out = np.zeros(n, dtype=bool)
+    if n == 0:
+        return out
+    raw = np.zeros_like(pos, dtype=bool)
+    raw[1:] = np.abs(np.diff(pos, axis=0)) > REBALANCE_ABS_TOL
+    drift = drifted_weights(positions, asset_returns)
+    defined = np.isfinite(drift)
+    ref = np.where(defined, drift, 0.0)
+    moved = np.abs(pos - ref) > np.abs(ref) * REBALANCE_REL_TOL + REBALANCE_ABS_TOL
+    moved = np.where(defined, moved, True)
+    out = (raw & moved).any(axis=1)
+    out[0] = bool((np.abs(pos[0]) > REBALANCE_ABS_TOL).any())
+    return out
+
+
 def traded_dollars_series(positions: pd.DataFrame,
                           asset_returns: pd.DataFrame) -> pd.Series:
     """Two-sided dollars traded per period per unit of book NAV, drift-aware.

@@ -9,7 +9,8 @@ import pytest
 
 from qaudit import AuditReport, BacktestArtifacts, demo
 from qaudit.synthetic import SyntheticBacktest
-from qaudit.types import errored, failed, passed, skipped, warned
+from qaudit.types import (Severity, Status, errored, failed, passed, skipped,
+                          warned)
 
 
 class ReportDocument(HTMLParser):
@@ -67,8 +68,8 @@ def test_demo_exports_same_complete_evidence_in_html_and_json(monkeypatch, tmp_p
     monkeypatch.setattr(demo, "run_case", lambda _: (clean, report))
     output = tmp_path / "shareable"
     assert demo.main(["clean", "--summary-only", "--output-dir", str(output)]) == 0
-    payload = json.loads((output / "reports.json").read_text())
-    document = ReportDocument((output / "index.html").read_text())
+    payload = json.loads((output / "reports.json").read_text(encoding="utf-8"))
+    document = ReportDocument((output / "index.html").read_text(encoding="utf-8"))
     assert json.loads(document.data) == payload
     assert payload["demo_passed"] is True
     assert payload["cases"][0]["report"] == report.to_dict()
@@ -82,7 +83,7 @@ def test_failed_clean_guard_still_exports_failed_evidence(monkeypatch, tmp_path,
     monkeypatch.setattr(demo, "run_case", lambda _: (case(), AuditReport([result])))
     output = tmp_path / "failure"
     assert demo.main(["clean", "--summary-only", "--output-dir", str(output)]) == 1
-    payload = json.loads((output / "reports.json").read_text())
+    payload = json.loads((output / "reports.json").read_text(encoding="utf-8"))
     assert payload["demo_passed"] is False
     assert payload["cases"][0]["report"]["results"][0]["status"] == result.status.value
 
@@ -94,19 +95,19 @@ def test_missed_defect_export_cannot_claim_success(monkeypatch, tmp_path):
     ])))
     output = tmp_path / "missed"
     assert demo.main(["overfit", "--summary-only", "--output-dir", str(output)]) == 1
-    payload = json.loads((output / "reports.json").read_text())
+    payload = json.loads((output / "reports.json").read_text(encoding="utf-8"))
     assert payload["demo_passed"] is False
     assert payload["cases"][0]["expected_flags"] == {"performance.": False}
 
 
 def test_existing_export_is_preserved_without_running_cases(monkeypatch, tmp_path):
     sentinel = tmp_path / "index.html"
-    sentinel.write_text("keep my previous report")
+    sentinel.write_text("keep my previous report", encoding="utf-8")
     def unexpected_run(_):
         pytest.fail("An existing output path should be rejected before auditing")
     monkeypatch.setattr(demo, "run_case", unexpected_run)
     assert demo.main(["clean", "--output-dir", str(tmp_path)]) == 2
-    assert sentinel.read_text() == "keep my previous report"
+    assert sentinel.read_text(encoding="utf-8") == "keep my previous report"
     assert not (tmp_path / "reports.json").exists()
 
 
@@ -122,7 +123,7 @@ def test_export_io_error_returns_nonzero(monkeypatch, tmp_path, capsys):
     real_export = demo.export_reports
 
     def export_after_race(rows, destination, **kwargs):
-        blocking_file.write_text("not a directory")
+        blocking_file.write_text("not a directory", encoding="utf-8")
         return real_export(rows, destination, **kwargs)
 
     monkeypatch.setattr(demo, "export_reports", export_after_race)
@@ -164,3 +165,47 @@ def test_html_cannot_bless_malformed_reserved_flags():
     assert rendered["presentation"]["status"] == "ERROR"
     assert rendered["presentation"]["judged_passes"] == 0
     assert rendered["presentation"]["contract_problems"]
+
+
+@pytest.mark.parametrize("field, value", [
+    ("status", "fail"),        # a plain string, not Status.FAIL
+    ("severity", "high"),
+    ("message", 3),
+    ("details", ["not", "a", "dict"]),
+])
+def test_every_renderer_survives_a_result_mutated_after_construction(field, value):
+    # CheckResult stays mutable. A later bad assignment makes the report
+    # structurally invalid (ok is False, gate raises); rendering must show
+    # that state instead of crashing, and must not mint a genuine verdict.
+    bad = warned("lookahead.mutated", "mutated result", severity=Severity.LOW,
+                 remediation="fix it")
+    setattr(bad, field, value)
+    report = AuditReport([passed("costs.fine", "ok"), bad])
+    assert not report.ok
+    # counted once, as INVALID, not also inside its old verdict group
+    assert "2 checks (1 PASS, 1 INVALID)" in report.summary()
+    text = str(report)
+    assert "[INVALID] lookahead.mutated" in text
+    assert "structurally invalid result" in text
+    entry = json.loads(json.dumps(report.to_dict(), allow_nan=False))["results"][1]
+    assert entry["contract_problem"]
+    # the explicit marker, never a string that reads as a real verdict,
+    # and the same word the text renderers show
+    assert entry["status"] == "invalid"
+    if field == "severity":
+        assert entry["severity"] == "invalid"
+    rendered = json.loads(ReportDocument(report.to_html()).data)["cases"][0]
+    assert rendered["presentation"]["status"] == "ERROR"
+    assert rendered["presentation"]["judged_passes"] == 0
+    assert rendered["presentation"]["contract_problems"]
+    markdown = report.to_markdown()
+    assert "| INVALID |" in markdown
+    # the valid neighbour still renders normally
+    assert "| PASS | info | `costs.fine` | ok |" in markdown
+    assert report["costs.fine"].status is Status.PASS
+
+
+def test_html_report_names_the_generator_not_an_author():
+    document = AuditReport([passed("costs.fine", "ok")]).to_html()
+    assert '<meta name="generator" content="qaudit">' in document
+    assert 'name="author"' not in document

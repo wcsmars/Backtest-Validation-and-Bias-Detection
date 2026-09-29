@@ -13,7 +13,7 @@ import pytest
 from qaudit.config import AuditConfig
 from qaudit.dynamic.probes_shift import (CHECK_DATE_SHIFT, CHECK_REPRO,
                                          CHECK_SENSITIVITY, CHECK_TRUNCATION,
-                                         run)
+                                         _date_shift, run)
 from qaudit.synthetic import (make_clean, make_lookahead,
                               make_rolling_window_leak, momentum_signal)
 from qaudit.types import Severity, Status
@@ -85,9 +85,12 @@ def test_date_shift_fails_on_lookahead_via_peek_path(lookahead_results):
     assert sr_m1 < 0.5 * sr0
     # path (a): the message is about peeking earlier, not about delay
     assert "EARLIER" in r.message
-    assert "delay" not in r.message.split("-")[0].lower()
+    assert "delay" not in r.message.split(" - ")[0].lower()
     # message quality: carries the concrete baseline SR number
     assert f"{sr0:.1f}" in r.message
+    # the ratio gate decided (remnant ~0.4% of baseline) and the message says so
+    assert "remnant below 25% of baseline" in r.message
+    assert "noise band" not in r.message
     assert r.remediation  # must tell the researcher what to change
 
 
@@ -136,6 +139,65 @@ def test_date_shift_warn_path_on_ultrafast_edge(clean_case):
     assert r.severity is Severity.HIGH
     assert "delay" in r.message
     assert re.search(r"\d", r.message)
+
+
+def rigged_curve_bt(case, target_sr):
+    """backtest_func whose annualized SR at each shift k is exactly
+    target_sr[k]: a deterministic alternating series plus a constant."""
+    art = case.artifacts.aligned()
+    flat = case.backtest_func(art.signals, art.asset_returns) * 0.0
+    flat.iloc[::2] += 0.01
+    flat.iloc[1::2] -= 0.01
+    sd = float(flat.std(ddof=1))
+
+    def rigged_bt(signals, asset_returns):
+        for k, sr in target_sr.items():
+            ref = art.signals.shift(k)
+            if np.array_equal(signals.to_numpy(), ref.to_numpy(),
+                              equal_nan=True):
+                return flat + sr * sd / np.sqrt(art.periods_per_year)
+        raise AssertionError("unexpected signal frame passed to backtest_func")
+
+    return art, rigged_bt
+
+
+def test_date_shift_noise_gated_collapse_names_the_noise_band(clean_case):
+    """A modest baseline (SR 1.3 at n=1000, noise band +-0.50) whose k=-1
+    remnant (0.45) is 35% of baseline: commensurate by ratio, yet inside the
+    noise band, so the evaporation verdict stands. The messages must name
+    the noise band that decided, never claim the remnant fell below 25%."""
+    art, rigged_bt = rigged_curve_bt(
+        clean_case, {-3: 1.5, -2: 1.5, -1: 0.45, 0: 1.3, 1: 1.2, 2: 1.1,
+                     3: 1.0})
+    fail = {c.check: c for c in run(art, CFG, backtest_func=rigged_bt)}[
+        CHECK_DATE_SHIFT]
+    warn = _date_shift(art, CFG, rigged_bt, causal_verified=True)
+    assert (fail.status, fail.severity) == (Status.FAIL, Severity.CRITICAL)
+    assert (warn.status, warn.severity) == (Status.WARN, Severity.HIGH)
+    for r in (fail, warn):
+        d = r.details
+        assert d["peek_signature"] == "evaporation"
+        assert d["sr_peek_1"] / d["sr_baseline"] >= 0.25
+        assert d["sr_peek_1"] < d["peek_noise_floor_sr"]
+        assert "remnant below" not in r.message
+        assert "remnant 35% of baseline but inside the ~0 noise band" \
+            f" (+-{d['peek_noise_floor_sr']:.2f})" in r.message
+        assert "sub-commensurate" not in r.message
+        assert "cannot clear the noise band" in r.message
+
+
+def test_date_shift_ambiguous_negative_message_is_not_a_subtraction(
+        clean_case):
+    # sr(-1) = -0.7 sits below the -0.50 noise band but above the -1.0
+    # anti-correlation bar: the causal-stamped ambiguous WARN. The clause
+    # after "k=-1" is joined by a comma, so it cannot read as "-1 - ...".
+    art, rigged_bt = rigged_curve_bt(
+        clean_case, {-3: 1.5, -2: 1.5, -1: -0.7, 0: 1.3, 1: 1.2, 2: 1.1,
+                     3: 1.0})
+    r = _date_shift(art, CFG, rigged_bt, causal_verified=True)
+    assert (r.status, r.severity) == (Status.WARN, Severity.MEDIUM), r.message
+    assert r.details["peek_ambig_side"] == "negative_remnant"
+    assert "at shift k=-1, below the ~0 noise band (+-0.50)" in r.message
 
 
 def test_date_shift_skips_without_backtest_func(clean_case):

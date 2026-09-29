@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="430" viewBox="0 0 720 430" role="img" aria-labelledby="title desc" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+<title id="title">Predictive power by forward horizon, relative to t+1</title>
+<desc id="desc">Mean cross-sectional Spearman IC at forward horizons t+1 to t+6, divided by the IC at t+1. Honest momentum: 1.000, 1.016, 0.964, 0.911, 0.941, 0.787 (IC at t+1 0.0305). Planted lookahead: 1.000, 0.013, 0.012, 0.014, 0.004, 0.017 (IC at t+1 0.957).</desc>
+<rect x="0.5" y="0.5" width="719" height="429" rx="8" fill="#fcfcfb" stroke="#e1e0d9"/>
+<text x="24.0" y="34.0" font-size="16" fill="#0b0b0b" text-anchor="start" font-weight="600">Predictive power by forward horizon, relative to t+1</text>
+<text x="24.0" y="56.0" font-size="12" fill="#52514e" text-anchor="start" font-weight="normal">Mean cross-sectional Spearman IC at horizon h divided by the IC at t+1. Both series equal 1 at t+1 by construction.</text>
+<line x1="24.0" y1="82" x2="42.0" y2="82" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/>
+<circle cx="33.0" cy="82" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<text x="50.0" y="86.0" font-size="12" fill="#52514e" text-anchor="start" font-weight="normal">Honest momentum (clean control): IC at t+1 = 0.0305</text>
+<line x1="404.4" y1="82" x2="422.4" y2="82" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<circle cx="413.4" cy="82" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<text x="430.4" y="86.0" font-size="12" fill="#52514e" text-anchor="start" font-weight="normal">Planted lookahead: IC at t+1 = 0.957</text>
+<line x1="72" y1="360.0" x2="572" y2="360.0" stroke="#c3c2b7" stroke-width="1"/>
+<text x="62.0" y="364.0" font-size="11" fill="#898781" text-anchor="end" font-weight="normal" font-variant-numeric="tabular-nums">0.0</text>
+<line x1="72" y1="318.7" x2="572" y2="318.7" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="322.7" font-size="11" fill="#898781" text-anchor="end" font-weight="normal" font-variant-numeric="tabular-nums">0.2</text>
+<line x1="72" y1="277.3" x2="572" y2="277.3" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="281.3" font-size="11" fill="#898781" text-anchor="end" font-weight="normal" font-variant-numeric="tabular-nums">0.4</text>
+<line x1="72" y1="236.0" x2="572" y2="236.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="240.0" font-size="11" fill="#898781" text-anchor="end" font-weight="normal" font-variant-numeric="tabular-nums">0.6</text>
+<line x1="72" y1="194.7" x2="572" y2="194.7" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="198.7" font-size="11" fill="#898781" text-anchor="end" font-weight="normal" font-variant-numeric="tabular-nums">0.8</text>
+<line x1="72" y1="153.3" x2="572" y2="153.3" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="157.3" font-size="11" fill="#898781" text-anchor="end" font-weight="normal" font-variant-numeric="tabular-nums">1.0</text>
+<line x1="72" y1="112.0" x2="572" y2="112.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="116.0" font-size="11" fill="#898781" text-anchor="end" font-weight="normal" font-variant-numeric="tabular-nums">1.2</text>
+<text x="90.0" y="382.0" font-size="11" fill="#898781" text-anchor="middle" font-weight="normal">t+1</text>
+<text x="182.8" y="382.0" font-size="11" fill="#898781" text-anchor="middle" font-weight="normal">t+2</text>
+<text x="275.6" y="382.0" font-size="11" fill="#898781" text-anchor="middle" font-weight="normal">t+3</text>
+<text x="368.4" y="382.0" font-size="11" fill="#898781" text-anchor="middle" font-weight="normal">t+4</text>
+<text x="461.2" y="382.0" font-size="11" fill="#898781" text-anchor="middle" font-weight="normal">t+5</text>
+<text x="554.0" y="382.0" font-size="11" fill="#898781" text-anchor="middle" font-weight="normal">t+6</text>
+<text x="322.0" y="410.0" font-size="12" fill="#52514e" text-anchor="middle" font-weight="normal">Forward horizon (trading days after the signal date)</text>
+<text x="22.0" y="236.0" font-size="12" fill="#52514e" text-anchor="middle" font-weight="normal" transform="rotate(-90 22 236.0)">IC(h) / IC(t+1)</text>
+<line x1="72" y1="329.0" x2="572" y2="329.0" stroke="#898781" stroke-width="1" stroke-dasharray="4 4"/>
+<text x="568.0" y="344.0" font-size="11" fill="#898781" text-anchor="end" font-weight="normal">ic_decay_signature threshold 0.15</text>
+<polyline points="90.0,153.3 182.8,149.9 275.6,160.8 368.4,171.6 461.2,165.5 554.0,197.4" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="90.0" cy="153.3" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="182.8" cy="149.9" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="275.6" cy="160.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="368.4" cy="171.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="461.2" cy="165.5" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="554.0" cy="197.4" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<polyline points="90.0,153.3 182.8,357.4 275.6,357.5 368.4,357.1 461.2,359.3 554.0,356.6" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="90.0" cy="153.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="182.8" cy="357.4" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="275.6" cy="357.5" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="368.4" cy="357.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="461.2" cy="359.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<circle cx="554.0" cy="356.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<text x="182.8" y="137.9" font-size="11" fill="#0b0b0b" text-anchor="middle" font-weight="normal">1.02</text>
+<text x="191.8" y="348.4" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="normal">0.01</text>
+<text x="582.0" y="201.4" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="normal">Honest momentum</text>
+<text x="582.0" y="360.6" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="normal">Planted lookahead</text>
+</svg>

@@ -517,6 +517,62 @@ def test_unknown_config_field_raises():
         AuditConfig(sharpe_wrn=4.0)
 
 
+def test_unknown_config_field_assignment_raises():
+    # The same typo assigned after construction must raise too: otherwise it
+    # lands as a stray attribute no check reads, provenance never records,
+    # and the real field keeps its default (the audit runs looser than the
+    # caller believes).
+    cfg = AuditConfig()
+    with pytest.raises(TypeError, match=r"'sharpe_fial'.*'sharpe_fail'"):
+        cfg.sharpe_fial = 3.0
+    with pytest.raises(TypeError, match="n_trails"):
+        cfg.n_trails = 200
+    assert cfg.sharpe_fail == AuditConfig().sharpe_fail
+    assert cfg.n_trials is None
+    assert not hasattr(cfg, "sharpe_fial") and not hasattr(cfg, "n_trails")
+    # Genuine fields still assign (and validate) normally.
+    cfg.sharpe_fail = 6.0
+    assert cfg.sharpe_fail == 6.0
+
+
+def test_config_copy_pickle_and_replace_survive_the_assignment_guard():
+    import copy
+    import dataclasses
+    import pickle
+
+    cfg = AuditConfig(sharpe_warn=4.0, n_trials=12)
+    for clone in (copy.copy(cfg), copy.deepcopy(cfg),
+                  pickle.loads(pickle.dumps(cfg)),
+                  dataclasses.replace(cfg, n_trials=13)):
+        assert clone.sharpe_warn == 4.0
+        with pytest.raises(TypeError, match="sharpe_wrn"):
+            clone.sharpe_wrn = 1.0
+        with pytest.raises(InputValidationError, match="sharpe_warn"):
+            clone.sharpe_warn = -1.0
+    assert dataclasses.replace(cfg, n_trials=13).n_trials == 13
+
+
+def test_config_assignment_guard_cannot_be_switched_off_and_names_subclasses():
+    # The private guard flag is not a field: turning it off after
+    # construction would silently disable every later validation.
+    import dataclasses
+
+    cfg = AuditConfig()
+    with pytest.raises(TypeError, match="_validation_active"):
+        cfg._validation_active = False
+    with pytest.raises(TypeError, match="sharpe_wrn"):
+        cfg.sharpe_wrn = 1.0
+
+    @dataclasses.dataclass
+    class TeamConfig(AuditConfig):
+        desk: str = "eq"
+
+    team = TeamConfig()
+    team.desk = "macro"                  # a subclass field assigns normally
+    with pytest.raises(TypeError, match=r"TeamConfig has no field 'dsek'"):
+        team.dsek = "fx"
+
+
 def test_reasonable_config_overrides_still_construct():
     AuditConfig(sharpe_warn=4.0, n_trials=345, n_placebo=50,
                 min_embargo_periods=10, cost_sensitivity_bps=(2.0, 8.0))

@@ -6,56 +6,77 @@ lag and costs internally); without that callable each check SKIPs. One
 ``numpy.random.default_rng(config.seed)`` is created per :func:`run` and
 consumed in a fixed order (placebo panels first, then date-shuffle
 permutations, then cross-section relabelings), so every number is
-deterministic for a given config. Every user callable receives defensive
-copies of the input frames - a mutating ``backtest_func`` can corrupt its
-own copy but never the artifacts or a sibling probe's inputs.
+deterministic for a given config; the asset-relabeled control that only
+the sparse ``placebo_pipeline_bias`` FAIL path runs draws from its own
+``default_rng([config.seed, _TILT_CONTROL_STREAM])`` and never shifts that
+order. Every user callable receives defensive copies of the input
+frames: a mutating ``backtest_func`` can corrupt its own copy but never
+the artifacts or a sibling probe's inputs.
 
-Exposure-aware nulls: both null families preserve a book's net market
-exposure (a fully-invested placebo book earns the equity premium; a
-date-row shuffle preserves each asset's sample mean), so raw null Sharpes
-cannot distinguish honest beta carry from an engine bug. The two gates
-that ask "is the engine crediting something" therefore compare active
-Sharpes: each run's PnL is beta-hedged against the equal-weight basket of
-the same returns panel that run consumed (slope from the regression,
-intercept kept). ``placebo_pipeline_bias`` gates on the hedged placebo
-mean; ``shuffled_labels`` gates the hedged actual SR against hedged
-nulls. ``placebo_percentile`` is the exception by design: it compares the
-raw actual SR with the raw placebo SRs. Both sides went through the same
-pipeline on the same returns panel, so their market exposure is matched by
-construction and hedging would only add estimation noise to a
-like-for-like ranking; the hedged actual and the hedged null median are
-reported in its ``details`` for context, and the hedged question ("is
-there an edge beyond exposure") is the one ``shuffled_labels`` answers.
-Raw Sharpes are reported in every check's ``details``.
+Exposure-aware nulls: raw Sharpes carry whatever net market exposure a
+book has, and a null book's exposure is not the real book's by
+construction. A date-row shuffle preserves each asset's sample mean and a
+fully-invested placebo book earns the equity premium, so raw null Sharpes
+cannot distinguish honest beta carry from an engine bug; conversely a
+pipeline that maps signal levels into weights (a long-only score used as
+proportional weights, a signal used directly as target weights) turns the
+real positive score into a fully long book but the mean-zero dense
+placebo noise into roughly market-neutral books, so a raw ranking would
+credit the equity premium to an information-free signal. Every gate
+therefore compares active Sharpes: each run's PnL is beta-hedged against
+the equal-weight basket of the same returns panel that run consumed
+(slope from the regression, intercept kept). ``placebo_pipeline_bias``
+gates on the hedged placebo mean; ``placebo_percentile`` ranks the hedged
+actual SR among the hedged placebo SRs; ``shuffled_labels`` gates the
+hedged actual SR against hedged nulls. Raw Sharpes are reported in every
+check's ``details``.
 
 Two null constructions adapt to the inputs. Placebo panels are AR(1)
-noise matched to the real signal's persistence (``_signal_phi``) for
-dense signals; for sparse/event signals (fewer than
-``_PLACEBO_SPARSE_ACTIVITY`` of the non-NaN cells nonzero) they instead
-keep the complete real signal panel (values, NaNs, on/off runs and
-cross-sectional event breadth) intact and circularly shift every column by
-one shared random row offset (``_placebo_panel_sparse``) - an AR(1) panel is dense, trades
-every bar and is eaten by costs, which makes a costly sparse book look
-like it beats noise. The date-shuffle null permutes contiguous blocks of
-return rows (``_block_perm``; block length ``config.shuffle_block_len``,
-auto-derived from the larger of the panel's median absolute lag-1 return
-and squared-return autocorrelations by ``_auto_block_len`` and equal to 1
-- a plain row permutation - when both dependence measures are negligible),
-so signed serial correlation cannot cancel across assets and broad
+noise matched to the real signal's persistence for dense signals
+(``_signal_phi``: the larger of the per-column lag-1 autocorrelation and
+the persistence of the cross-sectional ranking the pipeline trades); for
+sparse/event signals (fewer than ``_PLACEBO_SPARSE_ACTIVITY`` of the
+non-NaN cells nonzero) they instead keep the complete real signal panel
+(values, NaNs, on/off runs and cross-sectional event breadth) intact and
+circularly shift every column by one shared random row offset
+(``_placebo_panel_sparse``) - an AR(1) panel is dense, trades every bar
+and is eaten by costs, which makes a costly sparse book look like it
+beats noise. The rotation keeps which assets carry the events, so a
+static tilt toward persistently outperforming names survives into every
+sparse placebo; the pipeline-bias gate separates it from an engine credit
+with an asset-relabeled control (``_sparse_tilt_control``). The
+date-shuffle null permutes contiguous blocks of return rows
+(``_block_perm``; block length ``config.shuffle_block_len``, auto-derived
+from the larger of the panel's median absolute lag-1 return and
+squared-return autocorrelations by ``_auto_block_len`` and equal to 1 (a
+plain row permutation) when both dependence measures are negligible), so
+signed serial correlation cannot cancel across assets and broad
 volatility clustering also lengthens the null's blocks.
 
 Checks
 ------
 dynamic.placebo_pipeline_bias
-    Persistence-matched random signal panels through the pipeline with
-    the real asset returns. A reliably positive mean null Sharpe *net of
-    market exposure* - or any constant-positive/riskless placebo run -
-    means the engine itself manufactures performance; the equity premium
-    earned by a beta-carrying book on random signals does not.
+    Placebo signal panels with no alignment to returns (persistence-matched
+    AR(1) noise, or the time-rotated real panel for sparse signals) through
+    the pipeline with the real asset returns. A reliably positive mean null
+    Sharpe *net of market exposure* - or any constant-positive/riskless
+    placebo run - means the engine itself manufactures performance; the
+    equity premium earned by a beta-carrying book on random signals does
+    not. On the sparse path a would-be FAIL is first re-measured on
+    asset-relabeled controls: the engine is convicted only when they show
+    the bias too, otherwise the verdict is a scoped WARN naming the static
+    per-asset event tilt (WARN HIGH when the controls cannot be measured).
+    The placebos trade about as often as the real book, so a credit that
+    scales with turnover (costs added instead of charged) is measured at
+    the size by which it inflates the real book: a small one on a
+    low-turnover book stays under ``placebo_null_sharpe_fail``. The static
+    cost reconciliation (``costs.missing_transaction_costs``: net above
+    gross) is the check for that class.
 dynamic.placebo_percentile
-    Where the actual (raw) Sharpe sits inside that placebo null
-    distribution; skipped with a pointer at the engine when the null is
-    degenerate (constant-positive placebo runs).
+    Where the actual Sharpe *net of market exposure* sits inside the
+    hedged placebo null distribution (raw figures in ``details``); skipped
+    with a pointer at the engine when the null is degenerate
+    (constant-positive placebo runs).
 dynamic.shuffled_labels
     Two nulls: real signals against date-shuffled returns (each date's
     cross-section preserved, signal/return alignment destroyed) and
@@ -70,13 +91,14 @@ dynamic.probe_health
     Emitted (WARN, LOW) when a null distribution had to be distrusted:
     more than ``_MAX_BAD_FRAC`` of its re-runs returned NaN/degenerate
     Sharpes (a backtest_func defect), or fewer than 2 valid re-runs exist
-    (an AuditConfig count of 1 - a 1-point null cannot be tested); the
+    (an AuditConfig count of 1; a 1-point null cannot be tested); the
     checks that depend on that distribution then SKIP instead of trusting
     it. Invalid callback return types, dates, or interior missing returns
     are rejected and surfaced as HIGH warnings even below that fraction.
 """
 from __future__ import annotations
 
+import functools
 from typing import Any, Callable
 
 import numpy as np
@@ -107,7 +129,7 @@ _BIAS_TSTAT_FAIL = 3.0
 
 # |annualized SR| beyond this is not a strategy, it is the riskless-credit
 # signature: a constant daily credit whose float representation leaves the
-# series std at rounding dust yields finite SRs of ~1e16 - same defect as
+# series std at rounding dust yields finite SRs of ~1e16, the same defect as
 # an exact +inf, so both are treated as one degenerate class.
 _SR_DEGENERATE_CAP = 1e3
 
@@ -133,6 +155,18 @@ _ACTIVE_TOL = 1e-12
 # column is NaN for the median (ignored), like a constant column.
 _PHI_MIN_OBS = 20
 
+# Minimum names finite on both dates before a consecutive-date rank
+# correlation enters the cross-sectional persistence median of
+# _xsec_rank_phi. Rank correlations are discrete in small cross-sections:
+# with 3 names they take only the values +/-1 and +/-0.5, so the median
+# over the dates of pure iid noise lands at +/-0.5 in about half of all
+# samples (measured over 40 seeds at 60-1000 dates) and would fake a
+# persistent signal; with 4 names it still reaches 0.4 on 60 dates. From
+# 5 names the iid median stays within +/-0.1 once the panel has a year of
+# data (+/-0.3 at 60 dates). A narrower panel keeps the per-column
+# estimate alone.
+_XSEC_MIN_ASSETS = 5
+
 # Signals whose active fraction (nonzero share of the non-NaN cells) is
 # below this get structure-matched sparse placebos instead of AR(1) noise.
 # Calibration: a continuous alpha export (z-scores, ranks, momentum) is
@@ -145,6 +179,13 @@ _PHI_MIN_OBS = 20
 # costed pipeline) passes the percentile most of the time; against
 # placebos with its own density it is flagged.
 _PLACEBO_SPARSE_ACTIVITY = 0.5
+
+# Stream tag of the asset-relabeled control that confirms a sparse
+# placebo_pipeline_bias FAIL (_sparse_tilt_control). It draws from
+# default_rng([config.seed, _TILT_CONTROL_STREAM]), an independent stream,
+# and only on that would-FAIL path, so every placebo, date-shuffle and
+# relabeling draw of the shared stream is unchanged whether it runs or not.
+_TILT_CONTROL_STREAM = 0x7117
 
 # A Monte Carlo null with only a handful of draws is too coarse to
 # exonerate a strategy, even when a lenient percentile threshold would
@@ -282,24 +323,107 @@ def _lag1_autocorr_by_column(frame: pd.DataFrame) -> np.ndarray:
     return np.asarray(ac, dtype=float)
 
 
+def _rank_corr_to_ar1(rho_s: float, n_names: float) -> float:
+    """AR(1) coefficient whose Gaussian placebo reproduces a measured
+    consecutive-date Spearman correlation ``rho_s`` over ``n_names`` names.
+
+    Consecutive cross-sections of an AR(1) placebo with coefficient r are
+    n iid bivariate-normal pairs with correlation r, whose sample Spearman
+    correlation has the exact expectation
+    E[r_s] = 6/(pi*(n+1)) * (arcsin(r) + (n-2)*arcsin(r/2)), strictly
+    increasing from -1 at r=-1 to 1 at r=1 for n >= 2; it is inverted by
+    linear interpolation on a 1e-4 grid. As n grows it tends to the
+    population relation r = 2*sin(pi*rho_s/6), and plugging rho_s in as r
+    under-states r further. Both leave the placebo of a persistent ranking
+    too churny, i.e. too costly (measured on a static score plus slow
+    noise: placebo turnover 1.5x the real book's at 10 names and 1.26x at
+    30 with the population relation, 0.89x and 0.97x with the finite-n
+    one). The caller feeds the median of the per-date correlations, which
+    sits slightly above their mean on small cross-sections, so the residual
+    error leans toward a smoother, cheaper placebo: the side on which the
+    percentile under-credits an edge instead of inventing one."""
+    grid = np.linspace(-1.0, 1.0, 20_001)
+    expected = (6.0 / (np.pi * (n_names + 1.0))
+                * (np.arcsin(grid) + (n_names - 2.0) * np.arcsin(grid / 2.0)))
+    return float(np.interp(rho_s, expected, grid))
+
+
+def _xsec_rank_phi(signals: pd.DataFrame) -> float:
+    """Persistence of the signal's cross-sectional ranking, as an AR(1)
+    coefficient: the median over consecutive date pairs of the Spearman
+    correlation between the two dates' cross-sections, each ranked over
+    the names finite on both dates (the Pearson correlation of the
+    demeaned rank vectors), converted by :func:`_rank_corr_to_ar1` at the
+    median number of such names. NaN when fewer than _PHI_MIN_OBS pairs
+    are measurable.
+
+    This is the persistence a cross-sectional pipeline actually trades: a
+    signal whose ordering is a stable per-asset level plus fast noise has
+    a per-column autocorrelation near 0 (Series.autocorr removes each
+    column's own mean, i.e. the level) yet re-ranks the book only slowly.
+    The median, not the mean: a monthly re-sort book keeps an identical
+    ranking on most consecutive dates, and the median asks for a placebo
+    that re-ranks about as rarely (measured on daily bars: placebo turnover
+    0.73-0.86x the real book's), while the mean is diluted by the re-sort
+    dates (about 4x). A pair counts only with >= _XSEC_MIN_ASSETS common
+    finite names and a non-constant ranking on both dates (an all-zero
+    sparse row or a fully tied row has no ordering); such pairs are skipped
+    by explicit masks, so no numpy empty-slice or divide warning (fatal
+    under -W error) can fire. A panel narrower than _XSEC_MIN_ASSETS names
+    therefore returns NaN."""
+    vals = signals.to_numpy(dtype=float)
+    if vals.shape[0] < 2 or vals.shape[1] < _XSEC_MIN_ASSETS:
+        return float("nan")
+    cur, prev = vals[1:], vals[:-1]
+    both = np.isfinite(cur) & np.isfinite(prev)
+    n_common = both.sum(axis=1)
+    rank_cur = pd.DataFrame(np.where(both, cur, np.nan)).rank(axis=1)
+    rank_prev = pd.DataFrame(np.where(both, prev, np.nan)).rank(axis=1)
+    # average ranks over n common names always sum to n(n+1)/2, so their
+    # mean is exactly (n+1)/2; cells outside the common set contribute 0
+    centre = ((n_common + 1.0) / 2.0)[:, None]
+    dc = np.where(both, rank_cur.to_numpy(dtype=float) - centre, 0.0)
+    dp = np.where(both, rank_prev.to_numpy(dtype=float) - centre, 0.0)
+    sxy = np.sum(dc * dp, axis=1)
+    sxx = np.sum(dc * dc, axis=1)
+    syy = np.sum(dp * dp, axis=1)
+    ok = (n_common >= _XSEC_MIN_ASSETS) & (sxx > 0.0) & (syy > 0.0)
+    if int(np.sum(ok)) < _PHI_MIN_OBS:
+        return float("nan")
+    rho_s = float(np.median(sxy[ok] / np.sqrt(sxx[ok] * syy[ok])))
+    return _rank_corr_to_ar1(rho_s, float(np.median(n_common[ok])))
+
+
 def _signal_phi(signals: pd.DataFrame) -> float:
-    """Estimate the real signal's persistence: median across assets of the
-    lag-1 autocorrelation of each column's non-NaN stretch, clipped into
-    [0, 0.999]. Placebo panels are generated with this AR(1) coefficient so
-    their turnover - and therefore their cost drag through the pipeline -
-    matches the real signal's smoothness; iid placebo noise would churn the
-    book, get eaten by costs and understate the null. A constant column
-    (an all-zero sparse export, a dead name) has no autocorrelation: its
-    NaN is ignored by the median instead of raising numpy's divide
-    warning (fatal under -W error); a column with fewer than _PHI_MIN_OBS
-    observations is NaN too (2 observations warn "Degrees of freedom <= 0"
-    through warnings.warn, which errstate does not cover, and 3 give
-    exactly +/-1)."""
+    """Estimate the real signal's persistence as the pipeline sees it: the
+    larger of (a) the median across assets of the lag-1 autocorrelation of
+    each column's non-NaN stretch and (b) the persistence of the
+    cross-sectional ranking (:func:`_xsec_rank_phi`), clipped into
+    [0, 0.999]. Placebo panels are generated with this AR(1) coefficient
+    so their turnover - and therefore their cost drag through the
+    pipeline - matches the real signal's smoothness; iid placebo noise
+    would churn the book, get eaten by costs and understate the null.
+
+    (a) alone misses persistence that lives in a static per-asset level: a
+    value/quality-style score plus fast noise measures ~0 per column while
+    its ranking barely moves, so its placebos churned 3-4x the real
+    book's turnover and a losing low-turnover book cleared the percentile
+    under costs. (b) is NaN (ignored) on panels with fewer than
+    _XSEC_MIN_ASSETS names or fewer than _PHI_MIN_OBS measurable date
+    pairs, leaving (a). A constant column (an all-zero sparse export, a
+    dead name) has no autocorrelation: its NaN is ignored by the median
+    instead of raising numpy's divide warning (fatal under -W error); a
+    column with fewer than _PHI_MIN_OBS observations is NaN too (2
+    observations warn "Degrees of freedom <= 0" through warnings.warn,
+    which errstate does not cover, and 3 give exactly +/-1)."""
     vals = _lag1_autocorr_by_column(signals)
     med = float(np.nanmedian(vals)) if vals.size and not np.all(np.isnan(vals)) \
         else 0.0
     if not np.isfinite(med):
         med = 0.0
+    xsec = _xsec_rank_phi(signals)
+    if np.isfinite(xsec):
+        med = max(med, xsec)
     return float(np.clip(med, 0.0, 0.999))
 
 
@@ -514,25 +638,11 @@ def _degenerate_skip(check_id: str, which: str, n_bad: int, n_total: int,
 # Checks
 # ---------------------------------------------------------------------------
 
-def _check_placebo_bias(config: AuditConfig, act_ok: np.ndarray,
-                        raw_ok: np.ndarray, phi: float,
-                        activity: float | None = None) -> CheckResult:
-    n = int(act_ok.size)
-    # activity is None on the dense AR(1) path; a float (< the sparse bar)
-    # names the structure-matched sparse placebos in the messages
-    if activity is None:
-        panel_kind = f"placebo AR(1) signal panels (phi={phi:.2f})"
-        placebo_kind = "ar1"
-    else:
-        panel_kind = (f"structure-matched sparse placebo panels "
-                      f"({100 * activity:.1f}% of cells active, the real "
-                      f"signal panel - values, NaN mask and run structure - "
-                      f"circularly shifted by one shared random row offset)")
-        placebo_kind = "sparse"
-
+def _null_mean_stats(act_ok: np.ndarray) -> dict[str, Any]:
+    """Finite-core summary of a hedged null for the pipeline-bias gate:
+    mean, std and t = mean / (std / sqrt(n)) over the runs within
+    +/-_SR_DEGENERATE_CAP, plus the constant-positive/-negative counts."""
     core, n_pos, n_neg = _split_degenerate(act_ok)
-    raw_core, _, _ = _split_degenerate(raw_ok)
-    mean_raw = float(np.mean(raw_core)) if raw_core.size else float("nan")
     n_f = int(core.size)
     mean_null = float(np.mean(core)) if n_f else float("nan")
     std_null = float(np.std(core, ddof=1)) if n_f >= 2 else float("nan")
@@ -545,8 +655,95 @@ def _check_placebo_bias(config: AuditConfig, act_ok: np.ndarray,
         t = float(np.copysign(np.inf, mean_null))
     else:
         t = float("nan")
+    return dict(mean_null=mean_null, std_null=std_null, t=t, n_finite=n_f,
+                n_degenerate_pos=n_pos, n_degenerate_neg=n_neg)
+
+
+def _bias_gate_fires(config: AuditConfig, stats: dict[str, Any]) -> bool:
+    """The pipeline-bias conviction gate on a hedged null summary
+    (:func:`_null_mean_stats`): any constant-positive/riskless run, or a
+    finite mean >= ``placebo_null_sharpe_fail`` with t >= _BIAS_TSTAT_FAIL.
+    NaN statistics compare False, so an unmeasurable null never fires."""
+    return bool(stats["n_degenerate_pos"] > 0
+                or (stats["mean_null"] >= config.placebo_null_sharpe_fail
+                    and stats["t"] >= _BIAS_TSTAT_FAIL))
+
+
+def _sparse_tilt_control(backtest_func: Callable, signals: pd.DataFrame,
+                         rets: pd.DataFrame, periods_per_year: float,
+                         config: AuditConfig
+                         ) -> tuple[np.ndarray, int, int]:
+    """Asset-relabeled control for the sparse ``placebo_pipeline_bias``
+    FAIL path -> (non-NaN hedged Sharpes, NaN-raw run count, run count).
+
+    A rotated sparse placebo keeps each asset's event frequency, so a
+    static tilt (events concentrated on names with persistent
+    idiosyncratic drift, whether a genuine characteristic premium or
+    names picked for their in-sample performance) survives into every
+    placebo and earns a reliably positive hedged mean through an honest
+    engine. Each control run rotates the real signal panel exactly like
+    :func:`_placebo_panel_sparse` and pairs it with the return columns
+    reassigned across assets, as the cross-section relabeling null of
+    ``shuffled_labels`` does: the events, each date's return cross-section,
+    the equal-weight basket (so the hedge) and any engine defect that
+    works through the returns it is handed survive; which asset earns
+    which return, and with it the per-asset tilt, does not. It runs
+    ``config.n_placebo`` pipeline calls drawn from
+    ``default_rng([config.seed, _TILT_CONTROL_STREAM])``, so every
+    placebo, date-shuffle and relabeling draw of the shared stream stays
+    bit-identical whether or not the control runs."""
+    crng = np.random.default_rng([int(config.seed), _TILT_CONTROL_STREAM])
+    vals = rets.to_numpy()
+    n_assets = rets.shape[1]
+    raws: list[float] = []
+    acts: list[float] = []
+    for _ in range(int(config.n_placebo)):
+        panel = _placebo_panel_sparse(signals, crng)
+        relabeled = pd.DataFrame(vals[:, crng.permutation(n_assets)],
+                                 index=rets.index, columns=rets.columns)
+        raw, act = _run_pipeline(backtest_func, panel, relabeled,
+                                 periods_per_year)
+        raws.append(raw)
+        acts.append(act)
+    _, n_bad = _split_valid(raws)
+    act_arr = np.asarray(acts, dtype=float)
+    return act_arr[~np.isnan(act_arr)], n_bad, len(raws)
+
+
+def _check_placebo_bias(config: AuditConfig, act_ok: np.ndarray,
+                        raw_ok: np.ndarray, phi: float,
+                        activity: float | None = None, *,
+                        relabeled_control: Callable[
+                            [], tuple[np.ndarray, int, int]] | None = None
+                        ) -> CheckResult:
+    """``relabeled_control`` (sparse path only, see
+    :func:`_sparse_tilt_control`) is called only when the rotated placebo
+    family would convict the engine on its finite mean; without it that
+    path FAILs as before."""
+    n = int(act_ok.size)
+    # activity is None on the dense AR(1) path; a float (< the sparse bar)
+    # names the structure-matched sparse placebos in the messages
+    if activity is None:
+        panel_kind = f"placebo AR(1) signal panels (phi={phi:.2f})"
+        placebo_kind = "ar1"
+        null_panels = "signal-free random panels"
+    else:
+        panel_kind = (f"structure-matched sparse placebo panels "
+                      f"({100 * activity:.1f}% of cells active, the real "
+                      f"signal panel - values, NaN mask and run structure - "
+                      f"circularly shifted by one shared random row offset)")
+        placebo_kind = "sparse"
+        null_panels = ("time-rotated copies of the real signal panel (no "
+                       "alignment to returns)")
+
+    stats = _null_mean_stats(act_ok)
+    n_pos, n_f = stats["n_degenerate_pos"], stats["n_finite"]
+    mean_null, std_null, t = stats["mean_null"], stats["std_null"], stats["t"]
+    raw_core, _, _ = _split_degenerate(raw_ok)
+    mean_raw = float(np.mean(raw_core)) if raw_core.size else float("nan")
     details = dict(n=n, mean_null=mean_null, std_null=std_null, t=t, phi=phi,
-                   n_finite=n_f, n_degenerate_pos=n_pos, n_degenerate_neg=n_neg,
+                   n_finite=n_f, n_degenerate_pos=n_pos,
+                   n_degenerate_neg=stats["n_degenerate_neg"],
                    mean_null_raw=mean_raw, placebo_kind=placebo_kind,
                    activity=activity)
 
@@ -560,8 +757,8 @@ def _check_placebo_bias(config: AuditConfig, act_ok: np.ndarray,
             _CHECK_PLACEBO_BIAS,
             f"{n_pos}/{n} placebo runs earn a constant-positive or near-"
             f"riskless PnL (annualized SR +inf or > {_SR_DEGENERATE_CAP:.0f} "
-            f"net of market exposure) through this pipeline on signal-free "
-            f"random panels - the engine pays a fixed credit regardless of "
+            f"net of market exposure) through this pipeline on "
+            f"{null_panels} - the engine pays a fixed credit regardless of "
             f"the signal; every backtest run through it is inflated"
             f"{finite_note}",
             severity=Severity.CRITICAL,
@@ -584,20 +781,110 @@ def _check_placebo_bias(config: AuditConfig, act_ok: np.ndarray,
             f"manufactured performance",
             details=details,
         )
-    if mean_null >= config.placebo_null_sharpe_fail and t >= _BIAS_TSTAT_FAIL:
-        return failed(
+    if _bias_gate_fires(config, stats):
+        remediation = ("audit the backtest engine itself, not the signal: "
+                       "verify the execution lag (positions held during t "
+                       "must come from signals at t-lag or earlier), that "
+                       "positions.loc[t] earn asset_returns.loc[t], and the "
+                       "cost/PnL accounting - random inputs must not earn a "
+                       "positive Sharpe beyond their market exposure")
+        if activity is None:
+            return failed(
+                _CHECK_PLACEBO_BIAS,
+                f"random signals earn mean annualized SR {mean_null:.2f} net "
+                f"of market exposure (t={fmt_tstat(t)}, n={n_f}) through "
+                f"this pipeline - the engine manufactures performance "
+                f"(execution-timing or PnL-accounting bug); every backtest "
+                f"run through it is inflated",
+                severity=Severity.CRITICAL,
+                remediation=remediation,
+                details=details,
+            )
+        # Sparse family: the placebos are the real signal panel rotated in
+        # time, so every asset keeps its event frequency and a static tilt
+        # toward persistently outperforming names survives into each run.
+        # The asset-relabeled control separates that tilt from an engine
+        # credit; only the would-FAIL path pays for its extra runs.
+        rotated = (f"{n_f} time-rotated copies of the real signal panel "
+                   f"({100 * activity:.1f}% of cells active; each date's "
+                   f"cross-section intact, its alignment to returns "
+                   f"destroyed) earn mean annualized SR {mean_null:.2f} net "
+                   f"of market exposure (t={fmt_tstat(t)}) through this "
+                   f"pipeline")
+        verdict = ("the engine manufactures performance (execution-timing "
+                   "or PnL-accounting bug); every backtest run through it is "
+                   "inflated")
+        if relabeled_control is None:
+            return failed(_CHECK_PLACEBO_BIAS, f"{rotated} - {verdict}",
+                          severity=Severity.CRITICAL,
+                          remediation=remediation, details=details)
+        ctl_act, ctl_bad, ctl_total = relabeled_control()
+        c = _null_mean_stats(ctl_act)
+        c_valid = int(ctl_act.size)
+        measured = c_valid >= 2 and ctl_bad <= _MAX_BAD_FRAC * ctl_total
+        convicts = measured and _bias_gate_fires(config, c)
+        details.update(control_kind="asset_relabeled", control_n=ctl_total,
+                       control_n_bad=ctl_bad, control_n_valid=c_valid,
+                       control_mean_null=c["mean_null"],
+                       control_std_null=c["std_null"], control_t=c["t"],
+                       control_n_finite=c["n_finite"],
+                       control_n_degenerate_pos=c["n_degenerate_pos"],
+                       control_measured=measured,
+                       static_tilt=measured and not convicts)
+        c_desc = (f"{ctl_total} asset-relabeled controls (the same kind of "
+                  f"rotations run on return columns reassigned across "
+                  f"assets, which removes any per-asset event tilt)")
+        if convicts:
+            c_pos = (f"; {c['n_degenerate_pos']} of them constant-positive "
+                     f"or near-riskless" if c["n_degenerate_pos"] else "")
+            return failed(
+                _CHECK_PLACEBO_BIAS,
+                f"{rotated}, and {c_desc} still earn mean annualized SR "
+                f"{c['mean_null']:.2f} (t={fmt_tstat(c['t'])}{c_pos}) - "
+                f"{verdict}",
+                severity=Severity.CRITICAL,
+                remediation=remediation,
+                details=details,
+            )
+        if not measured:
+            # the discriminator is missing: neither conviction nor the tilt
+            # reading is established (the shuffled_labels analogue is its
+            # WARN(HIGH) for an unmeasurable relabeling null)
+            return warned(
+                _CHECK_PLACEBO_BIAS,
+                f"{rotated}, but the {ctl_total} asset-relabeled controls "
+                f"that separate a static per-asset event tilt from an engine "
+                f"credit could not be measured ({ctl_bad}/{ctl_total} runs "
+                f"NaN/degenerate, {c_valid} with a measurable hedged "
+                f"Sharpe) - cannot distinguish manufactured performance "
+                f"from a tilt toward persistently outperforming names",
+                severity=Severity.HIGH,
+                remediation="make backtest_func return a valid net-return "
+                            "Series for column-relabeled asset_returns so "
+                            "the control can run; until then treat the "
+                            "engine as suspect: verify the execution lag, "
+                            "that positions.loc[t] earn asset_returns.loc[t], "
+                            "and the cost/PnL accounting",
+                details=details,
+            )
+        # Scoped verdict: the engine is cleared, the tilt is named. The
+        # tilt itself may be a genuine characteristic premium or names
+        # picked for their in-sample returns - this check cannot tell.
+        return warned(
             _CHECK_PLACEBO_BIAS,
-            f"random signals earn mean annualized SR {mean_null:.2f} net of "
-            f"market exposure (t={fmt_tstat(t)}, n={n_f}) through this pipeline - "
-            f"the engine manufactures performance (execution-timing or "
-            f"PnL-accounting bug); every backtest run through it is inflated",
-            severity=Severity.CRITICAL,
-            remediation="audit the backtest engine itself, not the signal: "
-                        "verify the execution lag (positions held during t "
-                        "must come from signals at t-lag or earlier), that "
-                        "positions.loc[t] earn asset_returns.loc[t], and the "
-                        "cost/PnL accounting - random inputs must not earn a "
-                        "positive Sharpe beyond their market exposure",
+            f"{rotated}, but {c_desc} earn mean annualized SR "
+            f"{c['mean_null']:.2f} (t={fmt_tstat(c['t'])}): the rotated "
+            f"panels' edge follows which assets carry the events - a "
+            f"static per-asset event tilt toward names that outperformed "
+            f"in this sample, not performance manufactured by the engine",
+            severity=Severity.MEDIUM,
+            remediation="a static event tilt can be a genuine characteristic "
+                        "premium or selection of names on in-sample returns: "
+                        "validate the event universe out of sample with "
+                        "deflated-Sharpe / trial-registry discipline instead "
+                        "of hunting engine bugs; placebo_percentile ranks the "
+                        "strategy against these tilted rotations, so it "
+                        "credits only timing beyond the tilt",
             details=details,
         )
     if mean_null < 0:
@@ -698,10 +985,37 @@ def _check_placebo_percentile(config: AuditConfig, placebo_ok: np.ndarray,
                               hedge_dust: bool = False,
                               n_hedge_dust: int = 0,
                               actual_sr_hedged: float = float("nan"),
-                              null_q50_hedged: float = float("nan")
+                              placebo_hedged: np.ndarray | None = None,
+                              sparse: bool = False
                               ) -> CheckResult:
-    n = int(placebo_ok.size)
-    if n == 0:
+    """Rank the actual Sharpe inside the placebo null.
+
+    ``placebo_ok`` / ``actual_sr`` are the raw Sharpes: they drive the
+    degenerate-null SKIP and the "callable did not respond" WARN. With
+    ``placebo_hedged`` (the non-NaN exposure-hedged placebo Sharpes, which
+    run() always supplies) the verdict ranks ``actual_sr_hedged`` among
+    them (``details["sr_basis"] == "hedged"``): raw Sharpes carry whatever
+    net exposure a book has, and a pipeline that maps signal levels into
+    weights makes a long-only score a fully long book but the mean-zero
+    placebo noise roughly market-neutral books, so a raw ranking would
+    credit the equity premium to the signal. ``actual_sr_raw`` and the
+    raw null quantiles stay in ``details``. Fewer than 2 hedged placebo
+    Sharpes count as hedge dust (the callable's placebo PnL is basket
+    exposure); without ``placebo_hedged`` the raw Sharpes are ranked
+    (``sr_basis == "raw"``). ``sparse`` names the null family (time-rotated
+    real signal panels instead of random AR(1) panels) in the messages.
+
+    When only some placebo runs are exactly linear in the basket, those
+    runs have no hedged Sharpe and are left out of the ranked null instead
+    of being scored as 0: the ranked actual has an active component (an
+    actual without one takes the "pure market exposure" path), so the
+    comparable null is the placebo runs that have one too, i.e. the
+    randomization test conditions on that event. It is also the
+    conservative side: scored as 0 they would add runs that a positive
+    actual beats and lower its p-value. ``details["n_hedge_dust"]`` counts
+    them and the message names them next to the ranked ``n``."""
+    n_raw = int(placebo_ok.size)
+    if n_raw == 0:
         return skipped(
             _CHECK_PLACEBO_PCT,
             "not run: no valid placebo outcomes remain, so a randomization "
@@ -712,6 +1026,10 @@ def _check_placebo_percentile(config: AuditConfig, placebo_ok: np.ndarray,
         )
     n_pos_raw = int(np.sum(np.isposinf(placebo_ok)
                            | (placebo_ok > _SR_DEGENERATE_CAP)))
+    if placebo_hedged is not None:
+        n_pos_active = max(n_pos_active, int(np.sum(
+            np.isposinf(placebo_hedged)
+            | (placebo_hedged > _SR_DEGENERATE_CAP))))
     if n_pos_active > 0 or n_pos_raw > 0:
         # a null containing constant-positive/riskless runs is not a
         # yardstick for the strategy - the defect is engine-side; do not
@@ -719,39 +1037,57 @@ def _check_placebo_percentile(config: AuditConfig, placebo_ok: np.ndarray,
         k = max(n_pos_active, n_pos_raw)
         return skipped(
             _CHECK_PLACEBO_PCT,
-            f"not run: {k}/{n} placebo re-runs returned constant-positive/"
+            f"not run: {k}/{n_raw} placebo re-runs returned constant-positive/"
             f"degenerate PnL (annualized SR +inf or > "
             f"{_SR_DEGENERATE_CAP:.0f}) - the placebo null is degenerate, so "
             f"the actual SR's percentile within it measures nothing about "
             f"the strategy; see dynamic.placebo_pipeline_bias for the "
             f"engine-side defect",
-            n_degenerate=k, n=n)
-    # The percentile is retained as a descriptive rank, with strict
-    # comparison so ties are never counted as beaten. The decision is made
-    # by the valid plus-one upper-tail randomization p-value: the observed
-    # strategy is one of n+1 possible outcomes, and every placebo >= actual
-    # (including ties) is an exceedance.
-    n_tied = int(np.sum(placebo_ok == actual_sr))
-    n_exceed = int(np.sum(placebo_ok >= actual_sr))
-    pct = float(np.mean(placebo_ok < actual_sr))
-    p = float((1.0 + n_exceed) / (n + 1.0))
+            n_degenerate=k, n=n_raw)
+    if placebo_hedged is not None and placebo_hedged.size < 2:
+        # fail closed: fewer than 2 placebo runs with a cross-sectional
+        # component cannot rank anything net of exposure (run() already
+        # passes hedge_dust here; a direct caller is held to the same rule)
+        hedge_dust = True
+        n_hedge_dust = max(n_hedge_dust, n_raw - int(placebo_hedged.size))
+    hedged = placebo_hedged is not None and not hedge_dust
+    null_label = "time-rotated-signal" if sparse else "random-signal"
+    null_desc = ("its own signal panel rotated in time" if sparse
+                 else "signal-free noise")
+    q05_raw, q50_raw, q95_raw = _placebo_quantiles(placebo_ok)
+    null_q50_hedged = (_placebo_quantiles(placebo_hedged)[1]
+                       if placebo_hedged is not None and hedged
+                       else float("nan"))
     alpha = 1.0 - float(config.placebo_percentile_warn)
     min_runs = _minimum_placebo_runs(alpha)
-    resolution_sufficient = min_runs is not None and n >= min_runs
-    q05, q50, q95 = _placebo_quantiles(placebo_ok)
-    # raw-on-both-sides is the design (see module docstring); the hedged
-    # actual and the hedged null median are informational only
-    details = dict(actual_sr=actual_sr, percentile=pct, p_value=p,
-                   alpha=alpha, n=n, n_tied=n_tied, n_exceed=n_exceed,
-                   best_possible_p_value=1.0 / (n + 1.0),
-                   min_null_runs=min_runs,
-                   resolution_sufficient=resolution_sufficient,
-                   p_value_method="plus_one_randomization",
-                   null_q05=q05, null_q50=q50, null_q95=q95,
-                   actual_sr_hedged=actual_sr_hedged,
-                   null_q50_hedged=null_q50_hedged)
 
-    if hedge_dust or n_tied == n:
+    def ranked(null: np.ndarray, actual: float, basis: str) -> dict[str, Any]:
+        # The percentile is retained as a descriptive rank, with strict
+        # comparison so ties are never counted as beaten. The decision is
+        # made by the valid plus-one upper-tail randomization p-value: the
+        # observed strategy is one of n+1 possible outcomes, and every
+        # placebo >= actual (including ties) is an exceedance.
+        n = int(null.size)
+        n_exceed = int(np.sum(null >= actual))
+        q05, q50, q95 = _placebo_quantiles(null)
+        return dict(actual_sr=actual, percentile=float(np.mean(null < actual)),
+                    p_value=float((1.0 + n_exceed) / (n + 1.0)), alpha=alpha,
+                    n=n, n_tied=int(np.sum(null == actual)),
+                    n_exceed=n_exceed, best_possible_p_value=1.0 / (n + 1.0),
+                    min_null_runs=min_runs,
+                    resolution_sufficient=min_runs is not None
+                    and n >= min_runs,
+                    p_value_method="plus_one_randomization",
+                    null_q05=q05, null_q50=q50, null_q95=q95, sr_basis=basis,
+                    actual_sr_raw=actual_sr, null_q05_raw=q05_raw,
+                    null_q50_raw=q50_raw, null_q95_raw=q95_raw,
+                    actual_sr_hedged=actual_sr_hedged,
+                    null_q50_hedged=null_q50_hedged,
+                    n_hedge_dust=n_hedge_dust)
+
+    details = ranked(placebo_ok, actual_sr, "raw")
+    n_tied, pct = details["n_tied"], details["percentile"]
+    if hedge_dust or n_tied == n_raw:
         # The null did not move: every valid placebo SR equals the actual
         # SR (zero-spread null), and/or every placebo PnL was exactly
         # linear in the equal-weight basket (hedge dust, computed in run()).
@@ -760,15 +1096,15 @@ def _check_placebo_percentile(config: AuditConfig, placebo_ok: np.ndarray,
         # wrong remediation.
         why = []
         if n_tied:
-            why.append(f"{n_tied}/{n} placebo outcomes equal the actual SR "
-                       f"exactly")
+            why.append(f"{n_tied}/{n_raw} placebo outcomes equal the actual "
+                       f"SR exactly")
         if hedge_dust:
-            why.append(f"{n_hedge_dust}/{n} placebo re-runs produced PnL "
+            why.append(f"{n_hedge_dust}/{n_raw} placebo re-runs produced PnL "
                        f"exactly linear in the equal-weight basket (hedge "
                        f"dust)")
         return warned(
             _CHECK_PLACEBO_PCT,
-            f"actual annualized SR {actual_sr:.2f} vs {n} random-signal "
+            f"actual annualized SR {actual_sr:.2f} vs {n_raw} {null_label} "
             f"re-runs: {' and '.join(why)} - the callable's output did not "
             f"respond to the signal panel, so its percentile "
             f"({100 * pct:.0f}th, ties not counted) measures nothing about "
@@ -782,9 +1118,51 @@ def _check_placebo_percentile(config: AuditConfig, placebo_ok: np.ndarray,
                         "evidence in either direction",
             details=details,
         )
-    tie_note = (f"; {n_tied}/{n} placebo outcome(s) tie the actual SR "
-                f"exactly and are not counted as beaten") if n_tied else ""
-    if not resolution_sufficient:
+    if hedged:
+        assert placebo_hedged is not None
+        details = ranked(placebo_hedged, actual_sr_hedged, "hedged")
+        if np.isnan(actual_sr_hedged):
+            # The placebo books carry a cross-sectional component but the
+            # actual book is exactly linear in the basket (hedge dust on the
+            # actual only): there is no active return to rank, and ranking
+            # its raw SR (market beta) against hedged placebos would credit
+            # the equity premium to the signal. NaN compares False, so the
+            # rank would read as p=1/(n+1); report no rank at all.
+            details.update(percentile=float("nan"), p_value=float("nan"))
+            return warned(
+                _CHECK_PLACEBO_PCT,
+                f"actual annualized SR {actual_sr:.2f} is pure market "
+                f"exposure: the book's PnL is exactly linear in the "
+                f"equal-weight basket, so it has no component beyond "
+                f"exposure to rank against {details['n']} {null_label} "
+                f"outcomes hedged the same way - no signal edge is "
+                f"measurable",
+                severity=Severity.HIGH,
+                remediation="the book's return is a fixed multiple of the "
+                            "equal-weight basket: verify backtest_func turns "
+                            "the signals into cross-sectional weights; "
+                            "holding the market is not a signal edge",
+                details=details,
+            )
+    act, n, p = details["actual_sr"], details["n"], details["p_value"]
+    n_tied, pct = details["n_tied"], details["percentile"]
+    q05, q50, q95 = (details["null_q05"], details["null_q50"],
+                     details["null_q95"])
+    # what is ranked, against what
+    actual_txt = (f"actual annualized SR {act:.2f} net of market exposure "
+                  f"(raw {actual_sr:.2f})" if hedged
+                  else f"actual annualized SR {act:.2f}")
+    null_txt = (f"{null_label} outcomes hedged the same way" if hedged
+                else f"{null_label} outcomes")
+    notes = (f"; {n_tied}/{n} placebo outcome(s) tie the actual SR "
+             f"exactly and are not counted as beaten") if n_tied else ""
+    # basket-linear placebo runs are not ranked (see the docstring): name
+    # them next to the ranked n
+    if hedged and n_hedge_dust:
+        notes += (f"; {n_hedge_dust} placebo re-run(s) with PnL exactly "
+                  f"linear in the equal-weight basket have no active "
+                  f"component and are not ranked")
+    if not details["resolution_sufficient"]:
         if min_runs is None:
             resolution_note = (f"no finite number of valid null runs can "
                                f"produce p < alpha={alpha:.3g}")
@@ -802,11 +1180,10 @@ def _check_placebo_percentile(config: AuditConfig, placebo_ok: np.ndarray,
                 "coarse null is not evidence of an edge")
         return warned(
             _CHECK_PLACEBO_PCT,
-            f"actual annualized SR {actual_sr:.2f} sits at the "
-            f"{100 * pct:.0f}th percentile of only {n} random-signal "
-            f"outcomes, but {resolution_note} (best attainable with "
+            f"{actual_txt} sits at the {100 * pct:.0f}th percentile of only "
+            f"{n} {null_txt}, but {resolution_note} (best attainable with "
             f"this null is p={1.0 / (n + 1.0):.3g}) - this Monte Carlo "
-            f"resolution cannot establish an edge{tie_note}",
+            f"resolution cannot establish an edge{notes}",
             severity=Severity.HIGH,
             remediation=resolution_remediation,
             details=details,
@@ -814,26 +1191,25 @@ def _check_placebo_percentile(config: AuditConfig, placebo_ok: np.ndarray,
     if not _p_clears_alpha(p, alpha):
         return warned(
             _CHECK_PLACEBO_PCT,
-            f"actual annualized SR {actual_sr:.2f} sits at the "
-            f"{100 * pct:.0f}th percentile of {n} random-signal outcomes "
-            f"(null 5/50/95% = {q05:.2f}/{q50:.2f}/{q95:.2f}) - "
+            f"{actual_txt} sits at the {100 * pct:.0f}th percentile of {n} "
+            f"{null_txt} (null 5/50/95% = {q05:.2f}/{q50:.2f}/{q95:.2f}) - "
             f"plus-one randomization p={p:.3f} exceeds alpha={alpha:.3g}; "
             f"indistinguishable from noise at the "
-            f"{100 * config.placebo_percentile_warn:.0f}% level{tie_note}",
+            f"{100 * config.placebo_percentile_warn:.0f}% level{notes}",
             severity=Severity.HIGH,
-            remediation="the strategy does not beat signal-free noise through "
-                        "its own pipeline: extend the sample, strengthen the "
-                        "signal, or shelve the strategy - do not allocate on "
-                        "this evidence",
+            remediation=f"the strategy does not beat {null_desc} through its "
+                        f"own pipeline: extend the sample, strengthen the "
+                        f"signal, or shelve the strategy - do not allocate "
+                        f"on this evidence; market exposure alone is not a "
+                        f"signal edge",
             details=details,
         )
     return passed(
         _CHECK_PLACEBO_PCT,
-        f"actual annualized SR {actual_sr:.2f} sits at the {100 * pct:.0f}th "
-        f"percentile of {n} random-signal outcomes (null 5/50/95% = "
-        f"{q05:.2f}/{q50:.2f}/{q95:.2f}); plus-one randomization "
-        f"p={p:.3f} clears alpha={alpha:.3g} and the "
-        f"{100 * config.placebo_percentile_warn:.0f}% bar{tie_note}",
+        f"{actual_txt} sits at the {100 * pct:.0f}th percentile of {n} "
+        f"{null_txt} (null 5/50/95% = {q05:.2f}/{q50:.2f}/{q95:.2f}); "
+        f"plus-one randomization p={p:.3f} clears alpha={alpha:.3g} and the "
+        f"{100 * config.placebo_percentile_warn:.0f}% bar{notes}",
         details=details,
     )
 
@@ -1012,9 +1388,7 @@ def run(artifacts: BacktestArtifacts, config: AuditConfig, *,
     placebo_ok, placebo_bad = _split_valid(placebo_raw)
     placebo_act = np.asarray([a for _, a in placebo_pairs], dtype=float)
     placebo_act = placebo_act[~np.isnan(placebo_act)]
-    placebo_act_core, n_pos_active, _ = _split_degenerate(placebo_act)
-    null_q50_hedged = float(np.median(placebo_act_core)) \
-        if placebo_act_core.size else float("nan")
+    _, n_pos_active, _ = _split_degenerate(placebo_act)
 
     # --- shuffled-label nulls (rng draws after the placebos) --------------
     # contiguous row blocks are permuted (block_len == 1 is the plain row
@@ -1122,9 +1496,20 @@ def run(artifacts: BacktestArtifacts, config: AuditConfig, *,
             n_total=n_placebo,
         ))
     else:
-        results.append(_check_placebo_bias(config, placebo_act, placebo_ok,
-                                           phi,
-                                           activity if sparse else None))
+        # sparse placebos keep each asset's event frequency: before the
+        # rotated family may convict the engine, the asset-relabeled control
+        # (own rng stream; n_placebo extra runs, spent only when the check
+        # would otherwise FAIL on the finite mean) must show the same bias.
+        # A static per-asset tilt does not survive it; with < 2 assets
+        # there is no cross-section to tilt and nothing to relabel.
+        relabeled_control = (
+            functools.partial(_sparse_tilt_control, backtest_func, signals,
+                              rets, ppy, config)
+            if sparse and n_assets >= 2 else None)
+        results.append(_check_placebo_bias(
+            config, placebo_act, placebo_ok, phi,
+            activity if sparse else None,
+            relabeled_control=relabeled_control))
 
     # check 2: percentile of the actual SR within the placebo nulls
     if placebo_unhealthy:
@@ -1137,11 +1522,14 @@ def run(artifacts: BacktestArtifacts, config: AuditConfig, *,
             "returned a series with undefined Sharpe (empty/constant-zero) - "
             "fix the callable's output to enable this check"))
     else:
+        # ranks the exposure-hedged actual among the hedged placebo SRs
+        # (raw figures in details; see the module docstring)
         hedge_dust = placebo_act.size < 2
         results.append(_check_placebo_percentile(
             config, placebo_ok, actual_raw, n_pos_active,
             hedge_dust=hedge_dust, n_hedge_dust=n_hedge_dust,
-            actual_sr_hedged=actual_act, null_q50_hedged=null_q50_hedged))
+            actual_sr_hedged=actual_act, placebo_hedged=placebo_act,
+            sparse=sparse))
 
     # check 3: shuffled labels (+ cross-section relabeling discriminator)
     if shuffle_unhealthy:

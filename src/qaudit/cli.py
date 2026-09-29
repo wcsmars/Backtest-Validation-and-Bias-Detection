@@ -18,6 +18,27 @@ from . import InputValidationError, Severity, Status, __version__, audit
 from .errors import QAuditError
 
 
+def _tolerant_stdio() -> None:
+    """Keep console output from crashing on characters the console cannot encode.
+
+    Check messages can carry typographic characters (for example
+    multiplication signs). On a console whose codec lacks them (a Latin-1 or ASCII locale)
+    with the default ``errors="strict"``, ``print`` raises
+    ``UnicodeEncodeError`` part-way through a report. Switch strict text
+    streams to ``backslashreplace``, which keeps every character
+    recoverable (for example as ``\\u2026``). Called by the console entry
+    points only; streams without ``reconfigure`` are left alone.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None or getattr(stream, "errors", None) != "strict":
+            continue
+        try:
+            reconfigure(errors="backslashreplace")
+        except (OSError, ValueError):
+            pass
+
+
 def read_panel(path: Path, *, universe: bool = False) -> pd.DataFrame:
     """Read a numeric date-by-asset CSV without silently repairing its axes.
 
@@ -203,4 +224,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def cli() -> None:
+    _tolerant_stdio()
     raise SystemExit(main())

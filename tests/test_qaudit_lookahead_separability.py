@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from qaudit.checks import lookahead
 from qaudit.config import AuditConfig
@@ -145,6 +146,18 @@ class TestBleedSeparabilityScoping:
         r = lookahead._same_bar_bleed(_arts(rets, comp, pos), CFG)
         assert r.status is Status.PASS
 
+    def test_honest_anti_tilt_still_passes(self):
+        # The causal family's raw mean is below threshold, so it should pass before
+        # separability scoping applies.
+        mkt = simulate_market(seed=11)
+        rets = mkt["returns"]
+        mom20 = momentum_signal(rets)
+        mom5 = momentum_signal(rets, window=5)
+        pos = _norm(0.80 * positions_from_signals(mom20, 1)
+                    - 0.20 * positions_from_signals(mom5, 1))
+        r = lookahead._same_bar_bleed(_arts(rets, mom20, pos), CFG)
+        assert r.status is Status.PASS
+
     def test_fifteen_pct_bleed_still_critical(self):
         # TP retention: a genuine 15% same-bar blend keeps CRITICAL - the
         # purged bar-t statistic clears its own bar (measured sep +0.56)
@@ -192,6 +205,31 @@ class TestBleedSeparabilityScoping:
         assert abs(r.details["sep_signal_freshness"]) \
             < lookahead.BLEED_SEP_FRESH_MIN
 
+    def test_prelagged_export_still_convicts(self):
+        # Using a pre-lagged exported signal on the same row at declared lag one
+        # violates the timestamp contract and retains its CRITICAL verdict.
+        mkt = simulate_market(seed=0, n_assets=25, n_periods=750)
+        rets = mkt["returns"]
+        export = momentum_signal(rets).shift(1)
+        pos = _norm(0.8 * _rankw(export) + 0.2 * _rankw(-rets.shift(1)))
+        r = lookahead._same_bar_bleed(_arts(rets, export, pos), CFG)
+        assert r.status is Status.FAIL
+        assert r.details["mean_partial_corr"] > 0.5
+
+    def test_lag2_bleed_flagged_scoped(self):
+        # At lag two or more, overlap between causal multi-sleeve and blended-book
+        # statistics prevents a categorical timing verdict. Warn with an explicit
+        # separability limitation.
+        mkt = simulate_market(seed=1000, n_assets=25, n_periods=750,
+                              mom_loading=0.15)
+        rets = mkt["returns"]
+        sig = momentum_signal(rets)
+        pos = _norm(0.85 * _rankw(sig.shift(2)) + 0.15 * _rankw(sig))
+        r = lookahead._same_bar_bleed(_arts(rets, sig, pos, lag=2), CFG)
+        assert r.status is Status.WARN
+        assert "not separable" in r.message
+        assert r.details["mean_partial_corr"] > 0.3
+
     def test_honest_deep_window_heavy_overlay_not_critical(self):
         # A 50/50 mixture of 25-day and 23-day reversal sleeves is nearly collinear and
         # uses only t-1 data. Its elevated purged statistic must not trigger a timing
@@ -214,6 +252,269 @@ class TestBleedSeparabilityScoping:
         # re-measuring those three classes across seeds (_rev_multisleeve
         # and the 15% blends in this file; an 8% blend built the same way).
         assert lookahead.BLEED_SEP_PARTIAL_FAIL == 0.47
+        # 0.15: honest older-lag books on skip-1 reversals purge to
+        # |sep| <= 0.095 (TestBleedOlderLagBooks), daily 2-5% blends keep
+        # 0.34+ and a 10% negated blend on a two-lag book 0.185+;
+        # re-measure all three before moving it.
+        assert lookahead.BLEED_SEP_ORTHO_FAIL == 0.15
+
+
+# ---------------------------------------------------------------------------
+# same_bar_bleed on held books and older-lag books: only bars where the
+# book re-decides are measured, and a return-orthogonal innovation is
+# judged after purging older structure
+# ---------------------------------------------------------------------------
+
+def _market(seed=0, n_assets=40, n_periods=750, death_frac=0.0):
+    return simulate_market(seed=seed, n_assets=n_assets, n_periods=n_periods,
+                           death_frac=death_frac)["returns"]
+
+
+def _reversal(rets, w, skip):
+    """Short-term reversal score: minus the z-scored w-bar mean return,
+    ending at t-1 (skip=True, a pre-lagged construction) or at t."""
+    ma = rets.rolling(w, min_periods=w).mean()
+    return -_zx(ma.shift(1) if skip else ma)
+
+
+def _schedule(index, kind):
+    """Rebalance rows: Mondays, every third bar, or month starts."""
+    if kind == "weekly":
+        return pd.Series(index.dayofweek == 0, index=index)
+    if kind == "every3":
+        return pd.Series(np.arange(len(index)) % 3 == 0, index=index)
+    per = index.to_period("M")
+    return pd.Series(np.r_[True, per[1:] != per[:-1]], index=index)
+
+
+def _held(target, refresh):
+    """Hold the target between rebalance rows (a constant-target record)."""
+    return target.where(refresh, np.nan).ffill().fillna(0.0)
+
+
+def _drift_held(target, refresh, rets):
+    """Hold between rebalance rows as self-financing drifted weights (the
+    record of an engine that stores actually-held weights)."""
+    tgt = target.fillna(0.0).to_numpy()
+    r = rets.fillna(0.0).to_numpy()
+    keep = np.asarray(refresh)
+    w = np.zeros_like(tgt)
+    for t in range(len(w)):
+        if t == 0 or keep[t]:
+            w[t] = tgt[t]
+        else:
+            w[t] = w[t - 1] * (1.0 + r[t - 1]) / (1.0 + w[t - 1] @ r[t - 1])
+    return pd.DataFrame(w, index=target.index, columns=target.columns)
+
+
+class TestBleedHeldBooks:
+    # Between rebalances a held book repeats an older decision, a function
+    # of signal[t-1-k]; for a short rolling signal that older structure
+    # shares dropped bars with the same-bar innovation. Measured on every
+    # bar, honest weekly books on a skip-1 5-bar reversal failed CRITICAL
+    # (raw about -0.15, NW t -19..-25) and honest weekly books on a 5-bar
+    # reversal ending at t drew the "not separable" WARN, while a monthly
+    # book trading the same-bar signal on each rebalance day passed.
+
+    @pytest.mark.parametrize("kind", ["weekly", "every3"])
+    def test_honest_held_skip1_reversal_passes(self, kind):
+        rets = _market()
+        sig = _reversal(rets, 5, skip=True)
+        pos = _held(_rankw(sig.shift(1)), _schedule(rets.index, kind))
+        r = lookahead._same_bar_bleed(_arts(rets, sig, pos), CFG)
+        assert r.status is Status.PASS
+        assert r.details["n_held"] > r.details["n_monotone"] > 0
+        assert "only hold an earlier decision" in r.message
+
+    def test_honest_drifted_weekly_book_passes(self):
+        # the same book recorded as drifting actually-held weights
+        rets = _market()
+        sig = _reversal(rets, 5, skip=True)
+        pos = _drift_held(_rankw(sig.shift(1)),
+                          _schedule(rets.index, "weekly"), rets)
+        r = lookahead._same_bar_bleed(_arts(rets, sig, pos), CFG)
+        assert r.status is Status.PASS
+        assert r.details["n_held"] > r.details["n_monotone"] > 0
+
+    def test_honest_weekly_book_with_delistings_not_flagged(self):
+        # names that stop trading are exited (and the book renormalized)
+        # between rebalances: those bars rescale the held book, re-decide
+        # nothing and count as held. An exit on a rebalance day keeps the
+        # name's zero weight in the measured cross-section, as on a daily
+        # book, so those days are the only measured non-monotone dates
+        # (too few to judge here: SKIP, never a flag)
+        rets = _market(death_frac=0.15)
+        sig = _reversal(rets, 5, skip=True)
+        refresh = _schedule(rets.index, "weekly")
+        held = _held(_rankw(sig.shift(1)), refresh)
+        pos = _norm(held.where(rets.notna(), 0.0))
+        r = lookahead._same_bar_bleed(_arts(rets, sig, pos), CFG)
+        assert r.status in (Status.PASS, Status.SKIP)
+        exit_bar = (rets.notna().shift(1, fill_value=True)
+                    & rets.isna()).any(axis=1)
+        assert exit_bar[~refresh].sum() > 0
+        assert r.details["n_usable"] <= exit_bar[refresh].sum()
+
+    @pytest.mark.parametrize("lag", [1, 2])
+    def test_honest_weekly_reversal_incl_current_bar_passes(self, lag):
+        # a reversal ending at t has a return-fresh innovation; measured on
+        # every bar, the held bars draw the "not separable" WARN with a leak
+        # remediation
+        rets = _market()
+        sig = _reversal(rets, 5, skip=False)
+        pos = _held(_rankw(sig.shift(lag)), _schedule(rets.index, "weekly"))
+        r = lookahead._same_bar_bleed(_arts(rets, sig, pos, lag=lag), CFG)
+        assert r.status is Status.PASS
+        assert "not separable" not in r.message
+
+    @pytest.mark.parametrize("sign", [1, -1])
+    def test_weekly_same_bar_sleeve_critical(self, sign):
+        # 15% of each weekly target from the signal of the bar it trades:
+        # the rebalance bars carry it at full strength (measured on every
+        # bar, the positive sleeve only reaches the intermittent WARN)
+        rets = _market()
+        sig = _reversal(rets, 5, skip=True)
+        tgt = _norm(0.85 * _rankw(sig.shift(1)) + sign * 0.15 * _rankw(sig))
+        pos = _held(tgt, _schedule(rets.index, "weekly"))
+        r = lookahead._same_bar_bleed(_arts(rets, sig, pos), CFG)
+        assert r.status is Status.FAIL
+        assert r.severity is Severity.CRITICAL
+        assert sign * r.details["sep_mean_partial_corr"] \
+            > lookahead.BLEED_SEP_ORTHO_FAIL
+        assert r.details["n_held"] > r.details["n_usable"]
+
+    def test_monthly_rebalance_day_leak_fails(self):
+        # 20-day momentum taken from the rebalance bar itself and held for
+        # the month: measured on every bar, the held bars (negative stale
+        # structure) cancel the +1.0 rebalance bars into a clean PASS
+        rets = _market(n_periods=1000)
+        sig = momentum_signal(rets)
+        pos = _held(_rankw(sig), _schedule(rets.index, "monthly"))
+        r = lookahead._same_bar_bleed(_arts(rets, sig, pos), CFG)
+        assert r.status is Status.FAIL
+        assert r.severity is Severity.CRITICAL
+        assert r.details["mean_partial_corr"] > 0.9
+        assert r.details["n_usable"] < lookahead._MIN_PARTIAL_DATES
+
+    def test_monthly_honest_passes(self):
+        rets = _market(n_periods=1000)
+        sig = momentum_signal(rets)
+        pos = _held(_rankw(sig.shift(1)), _schedule(rets.index, "monthly"))
+        r = lookahead._same_bar_bleed(_arts(rets, sig, pos), CFG)
+        assert r.status is Status.PASS
+        assert r.details["n_monotone"] >= lookahead._MIN_PARTIAL_DATES_SHORT
+
+    @pytest.mark.parametrize("kind", ["weekly", "monthly"])
+    def test_held_multisleeve_book_near_bar_never_fails(self, kind):
+        # The known cost of judging a held book on its rebalance dates
+        # alone. A 20-bar momentum book with a 20% 5-bar anti-tilt measures
+        # -0.07..-0.10 on its decisions and passes daily; on the smaller
+        # rebalance sample this draw crosses the 0.10 bar: the scoped
+        # "not separable" WARN held weekly, an unresolved PASS held monthly
+        # (46 dates, doubled t gate). It never FAILs, and declaring the
+        # composite the book trades resolves it.
+        rets = _market(seed=1, n_periods=1000)
+        mom = momentum_signal(rets)
+        comp = _norm(0.8 * _rankw(mom)
+                     - 0.2 * _rankw(momentum_signal(rets, window=5)))
+        pos = _held(comp.shift(1), _schedule(rets.index, kind))
+        r = lookahead._same_bar_bleed(_arts(rets, mom, pos), CFG)
+        assert abs(r.details["mean_partial_corr"]) > CFG.bleed_partial_fail
+        assert "rebalance dates" in r.message
+        if kind == "weekly":
+            assert r.status is Status.WARN
+            assert r.severity is Severity.HIGH
+            assert "not separable" in r.message
+        else:
+            assert r.status is Status.PASS
+            assert r.details["unresolved"] is True
+            assert "declaring the composite" in r.message
+        r = lookahead._same_bar_bleed(_arts(rets, comp, pos), CFG)
+        assert r.status is Status.PASS
+        assert not r.details.get("unresolved")
+        assert r.details["n_monotone"] >= lookahead._MIN_PARTIAL_DATES_SHORT
+
+    def test_few_rebalances_skip_and_static_book_passes(self):
+        # monotone vouching needs enough decisions, not only held depth: a
+        # book refreshed every 60 bars (12 decisions) skips; a book that
+        # never re-decides carries no decision a bleed could enter
+        rets = _market()
+        sig = momentum_signal(rets)
+        every60 = pd.Series(np.arange(len(rets)) % 60 == 0, index=rets.index)
+        r = lookahead._same_bar_bleed(
+            _arts(rets, sig, _held(_rankw(sig.shift(1)), every60)), CFG)
+        assert r.status is Status.SKIP
+        assert 0 < r.details["n_monotone"] < lookahead._MIN_PARTIAL_DATES_SHORT
+        static = pd.DataFrame(np.tile(np.linspace(-1.0, 1.0, rets.shape[1]),
+                                      (len(rets), 1)),
+                              index=rets.index, columns=rets.columns)
+        r = lookahead._same_bar_bleed(_arts(rets, sig, _norm(static)), CFG)
+        assert r.status is Status.PASS
+        assert r.details["n_monotone"] == 0
+        assert "never re-decide" in r.message
+
+
+class TestBleedOlderLagBooks:
+    # Daily books that hold or blend older values of a return-orthogonal
+    # (skip-1) signal track the same older structure: raw about -0.25, which
+    # the raw statistic alone would convict CRITICAL, while the purge of
+    # older returns and signal lags leaves |sep| <= 0.095.
+
+    @pytest.mark.parametrize("lags", [(1, 3), (1, 2, 3)])
+    def test_honest_older_lag_book_not_failed(self, lags):
+        rets = _market()
+        sig = _reversal(rets, 3, skip=True)
+        pos = _norm(sum(_rankw(sig.shift(k)) for k in lags))
+        r = lookahead._same_bar_bleed(_arts(rets, sig, pos), CFG)
+        assert r.status is Status.WARN
+        assert r.severity is Severity.HIGH
+        assert "not separable" in r.message
+        assert "return-orthogonal" in r.message
+        d = r.details
+        assert abs(d["sep_signal_freshness"]) < lookahead.BLEED_SEP_FRESH_MIN
+        assert abs(d["mean_partial_corr"]) > CFG.bleed_partial_fail
+        assert abs(d["sep_mean_partial_corr"]) < lookahead.BLEED_SEP_ORTHO_FAIL
+        assert "overlapping tranches" in (r.remediation or "")
+
+    @pytest.mark.parametrize("sign", [1, -1])
+    def test_small_daily_blend_stays_critical(self, sign):
+        # detection guard for the purged bar: a 3% same-row blend keeps
+        # sep +-0.35, far past it
+        rets = _market(n_assets=60)
+        sig = _reversal(rets, 5, skip=True)
+        pos = _norm(0.97 * _rankw(sig.shift(1)) + sign * 0.03 * _rankw(sig))
+        r = lookahead._same_bar_bleed(_arts(rets, sig, pos), CFG)
+        assert r.status is Status.FAIL
+        assert r.severity is Severity.CRITICAL
+        assert "return-orthogonal" in r.message
+        assert sign * r.details["sep_mean_partial_corr"] \
+            > 2 * lookahead.BLEED_SEP_ORTHO_FAIL
+
+    def test_negated_blend_on_two_lag_book(self):
+        # guard for the purged bar: a same-row blend with a sign error,
+        # diluted by two lawful sleeves (lags 1 and 3 of a skip-1 10-bar
+        # reversal). The honest book passes (raw about -0.05). 10% keeps
+        # |sep| 0.185-0.25 over seeds and 40-100 names, past 0.15; 6%
+        # purges to 0.115-0.16, around the bar, and is at least the scoped
+        # WARN. Raising BLEED_SEP_ORTHO_FAIL past ~0.19 fails this test.
+        rets = _market()
+        sig = _reversal(rets, 10, skip=True)
+        book = 0.5 * _rankw(sig.shift(1)) + 0.5 * _rankw(sig.shift(3))
+
+        def bleed(a):
+            pos = _norm(book - a * _rankw(sig))
+            return lookahead._same_bar_bleed(_arts(rets, sig, pos), CFG)
+
+        assert bleed(0.0).status is Status.PASS
+        r = bleed(0.10)
+        assert r.status is Status.FAIL
+        assert r.severity is Severity.CRITICAL
+        assert "return-orthogonal" in r.message
+        assert -r.details["sep_mean_partial_corr"] \
+            > lookahead.BLEED_SEP_ORTHO_FAIL
+        r = bleed(0.06)
+        assert r.status in (Status.WARN, Status.FAIL)
+        assert r.severity in (Severity.HIGH, Severity.CRITICAL)
 
 
 # ---------------------------------------------------------------------------

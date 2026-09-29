@@ -7,10 +7,11 @@ import pandas as pd
 import pytest
 
 from qaudit.config import AuditConfig
+from qaudit.dynamic import probes_null
 from qaudit.dynamic.probes_null import (
     _LEAK_MIN_ACTUAL_SR, _SR_DEGENERATE_CAP, _check_placebo_bias,
     _check_shuffled_labels, _gate_val, _hedged_resid_sr, _split_degenerate,
-    run,
+    _sparse_tilt_control, run,
 )
 from qaudit.inputs import BacktestArtifacts
 from qaudit.types import Severity, Status
@@ -139,6 +140,66 @@ def test_longonly_phantom_credit_engine_still_fails_bias():
     assert b.remediation
 
 
+def drifting_score_market(seed: int, alpha: float = 0.0, n_assets: int = 30,
+                          n_periods: int = 750) -> tuple[pd.DataFrame,
+                                                         pd.DataFrame]:
+    """A persistent long-only score in (0, 1) (logistic of AR(0.97) noise)
+    on a market drifting 6bp/day. alpha=0 is information-free; alpha > 0
+    makes the score predict next-bar idiosyncratic returns."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2018-01-01", periods=n_periods)
+    cols = [f"A{i:02d}" for i in range(n_assets)]
+    z = np.empty((n_periods, n_assets))
+    z[0] = rng.standard_normal(n_assets)
+    for t in range(1, n_periods):
+        z[t] = 0.97 * z[t - 1] + np.sqrt(1 - 0.97 ** 2) * \
+            rng.standard_normal(n_assets)
+    mkt = 6e-4 + 0.009 * rng.standard_normal(n_periods)
+    idio = 0.015 * rng.standard_normal((n_periods, n_assets))
+    z_lag = np.vstack([np.zeros((1, n_assets)), z[:-1]])
+    rets = (mkt[:, None] + idio
+            + alpha * (z_lag - z_lag.mean(axis=1, keepdims=True)))
+    score = pd.DataFrame(1.0 / (1.0 + np.exp(-z)), index=dates, columns=cols)
+    return score, pd.DataFrame(rets, index=dates, columns=cols)
+
+
+def bt_score_weighted(signals, asset_returns):
+    # signal levels straight into weights, 5 bps: the positive real score
+    # is a fully long book, a mean-zero placebo a roughly neutral one
+    w = signals.shift(1)
+    w = w.div(w.abs().sum(axis=1), axis=0).fillna(0.0)
+    gross = (w * asset_returns.fillna(0.0)).sum(axis=1)
+    return gross - w.diff().abs().sum(axis=1).fillna(0.0) * 5e-4
+
+
+@pytest.mark.parametrize("seed", [1, 3])
+def test_information_free_score_weighted_long_book_does_not_pass(seed):
+    # ranked raw against raw these books PASSed at p=1/41 (raw SR 0.99 /
+    # 2.63, almost all equity premium); the placebos are near market-
+    # neutral, so only the hedged ranking compares like with like
+    score, rets = drifting_score_market(seed)
+    res = probe(score, rets, bt_score_weighted,
+                cfg=AuditConfig(seed=seed, n_placebo=40, n_shuffle=2))
+    p = res["dynamic.placebo_percentile"]
+    assert p.status is Status.WARN, p.message
+    assert p.details["sr_basis"] == "hedged"
+    assert p.details["actual_sr_raw"] > p.details["actual_sr"] + 0.5
+    assert p.details["p_value"] > 0.2
+    assert "net of market exposure" in p.message
+    assert "hedged the same way" in p.message
+
+
+def test_informative_score_weighted_long_book_still_passes():
+    # power guard: a score that predicts idiosyncratic returns keeps
+    # clearing the hedged null through the same level-mapping pipeline
+    score, rets = drifting_score_market(0, alpha=4e-3)
+    res = probe(score, rets, bt_score_weighted,
+                cfg=AuditConfig(seed=0, n_placebo=40, n_shuffle=2))
+    p = res["dynamic.placebo_percentile"]
+    assert p.status is Status.PASS, p.message
+    assert p.details["sr_basis"] == "hedged"
+
+
 # ---------------------------------------------------------------------------
 # 2. static tilt vs accounting leak (cross-section relabeling null)
 # ---------------------------------------------------------------------------
@@ -210,6 +271,162 @@ def test_untrusted_xsec_null_downgrades_to_warn_not_fail():
     assert r.status is Status.WARN
     assert r.severity is Severity.HIGH
     assert "cannot distinguish" in r.message
+
+
+# ---------------------------------------------------------------------------
+# 2b. sparse static tilt vs engine credit (asset-relabeled control)
+# ---------------------------------------------------------------------------
+
+TILT_CFG = AuditConfig(seed=0, n_placebo=40, n_shuffle=2)
+
+
+def tilted_event_market(seed: int, n_assets: int = 40,
+                        n_periods: int = 1000) -> tuple[pd.DataFrame,
+                                                        pd.DataFrame]:
+    """20-bar long events with no timing information; the 6 names with a
+    persistent +12bp/day idiosyncratic drift carry them 7.5x as often
+    (start rate 0.30 vs 0.04 per 20 bars): a static per-asset event tilt,
+    ~7% of cells active (the sparse placebo path)."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2016-01-04", periods=n_periods)
+    cols = [f"A{i:02d}" for i in range(n_assets)]
+    alpha = np.zeros(n_assets)
+    alpha[:6] = 1.2e-3
+    mkt = rng.normal(3e-4, 0.01, n_periods)
+    rets = pd.DataFrame(mkt[:, None] + alpha
+                        + rng.normal(0.0, 0.015, (n_periods, n_assets)),
+                        index=dates, columns=cols)
+    rate = np.where(alpha > 0, 0.30, 0.04)
+    starts = rng.random((n_periods, n_assets)) < rate / 20
+    sig = pd.DataFrame(starts.astype(float), index=dates,
+                       columns=cols).rolling(20, min_periods=1).max()
+    return sig, rets
+
+
+def _event_book(w, asset_returns):
+    w = w.div(w.abs().sum(axis=1).replace(0.0, np.nan), axis=0).fillna(0.0)
+    gross = (w * asset_returns.fillna(0.0)).sum(axis=1)
+    return gross - 5e-4 * w.diff().abs().sum(axis=1).fillna(0.0)
+
+
+def bt_events(signals, asset_returns):
+    # textbook engine: lag 1, equal gross, 5 bps
+    return _event_book(signals.shift(1).fillna(0.0), asset_returns)
+
+
+def bt_events_peek(signals, asset_returns):
+    # engine bug: each held event is signed by the same bar's return
+    return _event_book(signals.shift(1).fillna(0.0).abs()
+                       * np.sign(asset_returns.fillna(0.0)), asset_returns)
+
+
+def test_sparse_static_tilt_is_named_not_convicted():
+    sig, rets = tilted_event_market(0)
+    b = probe(sig, rets, bt_events, cfg=TILT_CFG)[
+        "dynamic.placebo_pipeline_bias"]
+    # attack bites: the rotated placebos clear the conviction bar (they
+    # FAILed CRITICAL on it) because each name keeps its event frequency
+    assert b.details["placebo_kind"] == "sparse"
+    assert b.details["mean_null"] >= TILT_CFG.placebo_null_sharpe_fail
+    assert b.details["t"] >= 3.0
+    # ...but relabeling which asset earns which return removes the edge
+    assert b.status is Status.WARN and b.severity is Severity.MEDIUM, \
+        b.message
+    assert b.details["control_n"] == TILT_CFG.n_placebo
+    assert b.details["control_mean_null"] < TILT_CFG.placebo_null_sharpe_fail
+    assert b.details["static_tilt"] is True
+    assert "static per-asset event tilt" in b.message
+    assert "time-rotated copies of the real signal panel" in b.message
+    assert "random signals" not in b.message
+    assert "out of sample" in b.remediation
+
+
+def test_sparse_engine_bug_survives_the_relabeled_control():
+    # the paired attack on the same tilted panel: an engine defect that
+    # works through the returns it is handed survives the relabeling
+    sig, rets = tilted_event_market(0)
+    b = probe(sig, rets, bt_events_peek, cfg=TILT_CFG)[
+        "dynamic.placebo_pipeline_bias"]
+    assert b.status is Status.FAIL and b.severity is Severity.CRITICAL
+    assert b.details["control_mean_null"] >= TILT_CFG.placebo_null_sharpe_fail
+    assert b.details["static_tilt"] is False
+    assert "asset-relabeled controls" in b.message
+    assert "still earn" in b.message
+    assert "random signals" not in b.message
+
+
+def test_relabeled_control_is_seeded_on_its_own_stream(monkeypatch):
+    sig, rets = tilted_event_market(0)
+    art = BacktestArtifacts(signals=sig, asset_returns=rets).aligned()
+    a = _sparse_tilt_control(bt_events, art.signals, art.asset_returns,
+                             252.0, TILT_CFG)
+    b = _sparse_tilt_control(bt_events, art.signals, art.asset_returns,
+                             252.0, TILT_CFG)
+    assert np.array_equal(a[0], b[0]) and a[1:] == b[1:] == (0, 40)
+    # the shared-stream draws (placebos, date shuffles, relabelings) are
+    # the same whether the control runs or is replaced by a stub
+    ran = probe(sig, rets, bt_events, cfg=TILT_CFG)
+    monkeypatch.setattr(probes_null, "_sparse_tilt_control",
+                        lambda *args: (np.array([0.0, -0.1, 0.1]), 0, 3))
+    stub = probe(sig, rets, bt_events, cfg=TILT_CFG)
+    for cid in ("dynamic.placebo_percentile", "dynamic.shuffled_labels"):
+        assert ran[cid].details.keys() == stub[cid].details.keys()
+        for k, v in ran[cid].details.items():
+            if isinstance(v, float) and np.isnan(v):
+                assert np.isnan(stub[cid].details[k]), (cid, k)
+            else:
+                assert stub[cid].details[k] == v, (cid, k)
+    for k in ("mean_null", "t", "n_finite"):
+        assert (ran["dynamic.placebo_pipeline_bias"].details[k]
+                == stub["dynamic.placebo_pipeline_bias"].details[k])
+
+
+def _stub_control(values, n_bad=0):
+    arr = np.asarray(values, dtype=float)
+    return lambda: (arr, n_bad, arr.size + n_bad)
+
+
+def _must_not_run():
+    raise AssertionError("the relabeled control must not run here")
+
+
+def test_relabeled_control_runs_only_on_the_sparse_would_fail_path():
+    cfg = AuditConfig()
+    rng = np.random.default_rng(4)
+    rotated = rng.normal(0.8, 0.3, 40)         # clears 0.50 with t >= 3
+    quiet = rng.normal(-0.2, 0.3, 40)
+    assert _check_placebo_bias(cfg, quiet, quiet, 0.5, 0.05,
+                               relabeled_control=_must_not_run
+                               ).status is Status.PASS
+    # the dense path and a riskless run convict without consulting it
+    assert _check_placebo_bias(cfg, rotated, rotated, 0.5, None,
+                               relabeled_control=_must_not_run
+                               ).status is Status.FAIL
+    riskless = np.append(rotated, np.inf)
+    assert _check_placebo_bias(cfg, riskless, riskless, 0.5, 0.05,
+                               relabeled_control=_must_not_run
+                               ).status is Status.FAIL
+
+
+def test_unmeasurable_relabeled_control_warns_high_not_fail():
+    rotated = np.random.default_rng(5).normal(0.8, 0.3, 40)
+    r = _check_placebo_bias(AuditConfig(), rotated, rotated, 0.5, 0.05,
+                            relabeled_control=_stub_control([0.3], n_bad=39))
+    assert r.status is Status.WARN and r.severity is Severity.HIGH
+    assert "cannot distinguish" in r.message
+    assert r.details["control_measured"] is False
+    assert r.details["static_tilt"] is False
+
+
+def test_riskless_relabeled_control_run_convicts():
+    rotated = np.random.default_rng(6).normal(0.8, 0.3, 40)
+    control = np.append(np.random.default_rng(7).normal(-0.1, 0.3, 39),
+                        np.inf)
+    r = _check_placebo_bias(AuditConfig(), rotated, rotated, 0.5, 0.05,
+                            relabeled_control=_stub_control(control))
+    assert r.status is Status.FAIL and r.severity is Severity.CRITICAL
+    assert "constant-positive or near-riskless" in r.message
+    assert r.details["control_n_degenerate_pos"] == 1
 
 
 # ---------------------------------------------------------------------------

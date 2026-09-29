@@ -7,6 +7,8 @@
 .env.*
 !.env.example
 config.local.*
+config.yaml
+config.yml
 credentials.yaml
 credentials.yml
 credentials.json
@@ -23,12 +25,29 @@ data/raw/
 data/private/
 *.log
 
+# Document and presentation files
+paper/
+papers/
+manuscript/
+slides/
+*.tex
+*.bib
+*.docx
+*.pdf
+*.ppt
+*.pptx
+
 # Python and editor artifacts
 __pycache__/
 *.py[cod]
+*$py.class
 .venv/
 venv/
+env/
 *.egg-info/
+*.egg
+htmlcov/
+/tmp/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

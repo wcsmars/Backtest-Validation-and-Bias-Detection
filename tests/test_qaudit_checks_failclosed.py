@@ -349,8 +349,11 @@ def test_all_false_universe_padding_cannot_fake_breadth_and_attrition():
 
     # Never-live columns may appear before live columns: the exit scan must
     # retain grid coordinates while using only ever-live names as its rate
-    # denominator.
-    universe.iloc[:400, -10:] = True
+    # denominator. The exits are staggered one name per bar: ten names
+    # leaving on one bar would be a mass exit, which no_exits excludes as
+    # a membership feed gap rather than attrition.
+    for k in range(10):
+        universe.iloc[:400 + 10 * k, -10 + k] = True
     broad = BacktestArtifacts(signals=signals, asset_returns=rets,
                               universe=universe)
     broad.validate()
